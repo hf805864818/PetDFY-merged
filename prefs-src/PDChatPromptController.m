@@ -10,7 +10,7 @@
 #import "PDChatService.h"
 
 extern NSString *PDLocalizedString(NSString *key);   // 0x23cac
-extern CFStringRef PDPreferencesDomain;              // 0x4cc00 全局变量（__DATA_CONST __const）
+extern NSString *PDPreferencesDomain;              // 0x4cc00 全局变量（__DATA_CONST __const）
 extern CFStringRef PDPreferencesChangedNotification; // 0x4cc08 全局变量
 
 // 0x1f6f8 / 0x1f808 / 0x1f5d8 处接收者都是 OBJC_CLASS_$_PDChatService，即类方法
