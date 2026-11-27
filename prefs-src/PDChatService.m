@@ -17,6 +17,11 @@
 #import "PDAIMemory.h"
 #import "PDChatServiceInternals.h"
 
+// ── 外部 C 辅助（定义在 PDAIHelpers.m）──
+extern id PDAIPreference(id key, id fallback);
+extern NSString *PDAIString(id value);
+extern double PDAINumber(id value, double fallback);
+
 // 31 个 ivar，布局与二进制一致（总长 0xf0）  // D7 ivar_list@0x54b08 count=31
 @interface PDChatService () {
     BOOL _busy;                              // 0x08
@@ -61,7 +66,7 @@ static BOOL PDDataMaintenancePending = NO;
 static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id rawCompletion) {
     void (^completion)(id) = rawCompletion;
     CFPreferencesAppSynchronize(PDPreferencesDomainRef());
-    id raw = CFPreferencesCopyAppValue(CFSTR("DataMaintenanceResult"), PDPreferencesDomainRef());
+    id raw = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("DataMaintenanceResult"), PDPreferencesDomainRef()));
     NSDictionary *result = [raw isKindOfClass:[NSDictionary class]] ? raw : nil;
     if ([[result objectForKeyedSubscript:@"id"] isEqual:requestID]) {
         PDDataMaintenancePending = NO;
@@ -95,7 +100,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
 - (id)init {
     // _PDDataPath() -> "/var/mobile/Library/Application Support/PetDFY"
     return [self initWithDataDirectory:PDDataPath()
-                 sessionConfiguration:[NSURLSession ephemeralSessionConfiguration]];
+                 sessionConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]];
 }
 
 // imp 0x00d2bc  types @16@0:8
