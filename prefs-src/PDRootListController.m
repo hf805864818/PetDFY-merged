@@ -20,7 +20,7 @@
 // ── 外部 C 符号（定义在 PetDFYPrefs 其它编译单元，本文件只声明）──────────────
 extern NSString *PDLocalizedString(NSString *key);
 
-extern CFStringRef const PDPreferencesDomain;              // CF "com.susudear.petdfyprefs"
+extern NSString *PDPreferencesDomain;              // CF "com.susudear.petdfyprefs"
 extern CFStringRef const PDPreferencesChangedNotification;
 extern CFStringRef const PDCommandNotification;
 extern CFStringRef const PDAssetStatusNotification;        // CF "com.susudear.petdfy/assets-status"
