@@ -49,7 +49,7 @@ echo "目标: $TRIPLE"
     -O2 -g -Wno-deprecated-declarations -Wno-unused-function \
     -Wno-nullability-completeness -Wno-objc-multiple-method-names \
     -Wno-unused-variable -Wno-unused-but-set-variable \
-    -I prefs-src \
+    -I prefs-src -I prefs-shim \
     -dynamiclib -install_name @rpath/PetDFYPrefs.dylib \
     -framework Foundation -framework UIKit -framework CoreGraphics \
     -framework AVFoundation -framework ImageIO -framework UniformTypeIdentifiers \
