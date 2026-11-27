@@ -95,7 +95,7 @@ extern NSString *PDLocalizedString(NSString *key);
 }
 
 // imp 0x00a380  types v16@0:8
-- (void).cxx_destruct {
+- (void)dealloc {
     // 0xa380..0xa390: objc_storeStrong(&sectionTitleLabel, nil)
     _sectionTitleLabel = nil;
 }
