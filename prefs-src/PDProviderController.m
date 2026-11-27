@@ -12,7 +12,6 @@ extern double PDAINumber(id value, double fallback);               // imp 0x132f
 
 // 头文件把本类写成 NSObject 子类（二进制里是 PSListController，super 派发走
 // _OBJC_CLASS_$_PDProviderController；0x58358）。补齐声明以便编译与 super 派发。
-@end
 
 @implementation PDProviderController
 
@@ -119,5 +118,4 @@ extern double PDAINumber(id value, double fallback);               // imp 0x132f
 
     [super setPreferenceValue:value specifier:specifier];
 }
-
 @end
