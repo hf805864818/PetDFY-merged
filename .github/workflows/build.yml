@@ -47,6 +47,8 @@ jobs:
             sudo ln -sf "/usr/bin/clang-$V"      /usr/local/bin/clang
             sudo ln -sf "/usr/bin/clang++-$V"    /usr/local/bin/clang++ 2>/dev/null || true
             sudo ln -sf "/usr/bin/ld64.lld-$V"   /usr/local/bin/ld64.lld
+            # clang -fuse-ld=lld 会找 ld.lld；必须指向 Mach-O 的 ld64.lld，否则命中 ELF ld.lld
+            sudo ln -sf "/usr/bin/ld64.lld-$V"   /usr/local/bin/ld.lld
             sudo ln -sf "/usr/bin/llvm-lipo-$V"  /usr/local/bin/llvm-lipo 2>/dev/null || true
             echo "== pinned LLVM $V =="
           else
