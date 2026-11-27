@@ -50,10 +50,10 @@ echo "目标: $TRIPLE"
     -Wno-nullability-completeness -Wno-objc-multiple-method-names \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -I prefs-src -I prefs-shim \
-    -dynamiclib -fuse-ld=lld -install_name @rpath/PetDFYPrefs.dylib \
+    -dynamiclib -fuse-ld=lld -Wl,-undefined,dynamic_lookup -install_name @rpath/PetDFYPrefs.dylib \
     -framework Foundation -framework UIKit -framework CoreGraphics \
     -framework AVFoundation -framework ImageIO -framework UniformTypeIdentifiers \
-    -framework Preferences -framework CoreFoundation \
+    -framework CoreFoundation \
     -o "$OUT/PetDFYPrefs" $SRCS
 
 if command -v ldid >/dev/null 2>&1; then
