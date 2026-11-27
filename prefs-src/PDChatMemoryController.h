@@ -5,6 +5,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+@class PDAIMemory;
+
 @interface PDChatMemoryController : UIViewController <UITableViewDataSource, UITableViewDelegate>
 
 - (void)viewDidLoad;
