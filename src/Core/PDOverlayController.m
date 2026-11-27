@@ -635,8 +635,8 @@ static BOOL PDInstallCombinedArchive(void) {
     if (renderer) {
         renderer.liveRig.scheme = scheme;
         renderer.liveRig.outfit = outfit;
-        renderer.resourceURL = renderer.resourceURL ?: [NSURL fileURLWithPath:
-            @"/Library/Application Support/PetDFY.bundle"];
+        // 兜底也走越狱根展开：RootHide 下 /Library 是系统只读，真身在 jbroot
+        renderer.resourceURL = renderer.resourceURL ?: [NSURL fileURLWithPath:PDResourceBundlePath()];
     }
 
     // 外观落地后：通知聊天层、按窗口/暂停状态决定声音可见性、同步漫游模式
