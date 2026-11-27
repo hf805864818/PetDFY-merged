@@ -46,6 +46,11 @@
 - (id)propertyForKey:(NSString *)key;
 - (void)setProperty:(id)value forKey:(NSString *)key;
 - (void)removePropertyForKey:(NSString *)key;
+- (NSDictionary *)titleDictionary;
+- (void)setTitleDictionary:(NSDictionary *)dict;
+- (NSDictionary *)shortTitleDictionary;
+- (void)setShortTitleDictionary:(NSDictionary *)dict;
+
 
 @end
 
@@ -72,6 +77,9 @@
 - (void)reloadSpecifiers;
 - (void)reloadSpecifier:(PSSpecifier *)specifier;
 - (void)reloadSpecifierID:(NSString *)identifier;
+- (id)loadSpecifiersFromPlistName:(NSString *)name target:(id)target;
+- (void)reloadSpecifier:(PSSpecifier *)specifier animated:(BOOL)animated;
+
 
 - (void)beginUpdates;
 - (void)endUpdates;
