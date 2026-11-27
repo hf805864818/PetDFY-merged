@@ -26,6 +26,11 @@
 //
 
 #import "PDSoundPlayer.h"
+
+// ---- 素材音效（sounds/ 下的 wav/mp3）----
+// 原实现只用 notesForSound: 合成音；素材包里有 6 个录音，命中就打文件，否则回退合成。
+static BOOL PDPlayBundledSound(NSString *name, double pan);
+static NSURL *PDBundledSoundURL(NSString *base);
 #import "PDVoice.h"
 #import <AVFoundation/AVFoundation.h>
 
@@ -51,6 +56,10 @@ static double PDSemitoneToHz(int n) {
 }
 
 @implementation PDSoundPlayer
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 
 #pragma mark - 单例
 
@@ -377,6 +386,9 @@ static double PDSemitoneToHz(int n) {
 - (void)playSound:(NSString *)name kind:(NSString *)kind
         arguments:(NSArray *)args pan:(double)pan {
     if (name.length == 0) return;                 // 0x1160c-0x11610
+
+    // 素材 sounds/ 优先（land→whale-landing 等）；没有素材文件时继续走合成
+    if (PDPlayBundledSound(name, pan)) return;
 
     NSArray *arguments = [args copy] ?: @[];      // 0x11614-0x11634（nil 时回落到 __NSArray0）
 
@@ -708,3 +720,78 @@ static double PDSemitoneToHz(int n) {
 }
 
 @end
+
+#pragma mark - 素材音效（sounds/）
+
+/// 事件名 → 素材文件名（不含扩展名）。素材里没有的事件返回 nil，回退合成音。
+static NSString *PDSoundFileBaseForName(NSString *name) {
+    static NSDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"land":    @"whale-landing",
+            @"poke":    @"whale-poke-pop",
+            @"step":    @"whale-slide-soft",
+            @"skid":    @"whale-slide-fast",
+            @"grab":    @"click_press",
+            @"drop":    @"click_release",
+            @"throw":   @"click_release",
+            @"click":   @"click_press",
+            @"release": @"click_release",
+        };
+    });
+    if (![name isKindOfClass:[NSString class]]) return nil;
+    return map[name];
+}
+
+/// 找素材根下的 sounds/<base>.{wav,mp3}；素材根用 PDJailbreak 候选链展开。
+static NSURL *PDBundledSoundURL(NSString *base) {
+    if (base.length == 0) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    for (NSString *p in PDAssetBundleRoots()) [roots addObject:p];
+    for (NSString *p in PDLegacyImportedRoots()) [roots addObject:p];
+
+    for (NSString *root in roots) {
+        NSString *dir = [root stringByAppendingPathComponent:@"sounds"];
+        for (NSString *ext in @[@"wav", @"mp3"]) {
+            NSString *path = [[dir stringByAppendingPathComponent:base] stringByAppendingPathExtension:ext];
+            if ([fm fileExistsAtPath:path]) return [NSURL fileURLWithPath:path];
+        }
+    }
+    return nil;
+}
+
+/// 播放器池：AVAudioPlayer 必须被持有，否则会立刻停。
+static NSMutableArray *PDBundledPlayers(void) {
+    static NSMutableArray *arr;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ arr = [NSMutableArray array]; });
+    return arr;
+}
+
+static BOOL PDPlayBundledSound(NSString *name, double pan) {
+    NSString *base = PDSoundFileBaseForName(name);
+    if (!base) return NO;
+    NSURL *url = PDBundledSoundURL(base);
+    if (!url) return NO;
+
+    NSError *err = nil;
+    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&err];
+    if (!player) {
+        NSLog(@"[PetDFY.Sound] bundled load failed %@: %@", url.lastPathComponent, err.localizedDescription);
+        return NO;
+    }
+    player.pan = (float)fmax(fmin(pan, 0.5), -0.5);
+    player.volume = 1.0;
+    if (![player prepareToPlay]) return NO;
+
+    NSMutableArray *pool = PDBundledPlayers();
+    @synchronized (pool) {
+        [pool addObject:player];
+        while (pool.count > 8) [pool removeObjectAtIndex:0];
+    }
+    [player play];
+    NSLog(@"[PetDFY.Sound] bundled %@", url.lastPathComponent);
+    return YES;
+}
