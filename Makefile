@@ -13,7 +13,9 @@
 #
 # 注意：src/Aux 是 Windows 保留设备名，仓库中已重命名为 src/Auxiliary。
 
-export ARCHS = arm64 arm64e
+# 只出 arm64：Linux 上的 clang/ld64.lld 编 arm64e 时 cpusubtype 不写 0x80000002，
+# lipo 会判定两个 slice 同架构而拒绝合并。arm64 在 arm64e 设备上可正常加载。
+export ARCHS ?= arm64
 export TARGET = iphone:clang:latest:16.0
 export INSTALL_TARGET_PROCESSES = SpringBoard
 
