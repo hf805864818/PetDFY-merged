@@ -26,6 +26,7 @@
 //
 
 #import "PDSoundPlayer.h"
+#import "PDJailbreak.h"
 
 // ---- 素材音效（sounds/ 下的 wav/mp3）----
 // 原实现只用 notesForSound: 合成音；素材包里有 6 个录音，命中就打文件，否则回退合成。
