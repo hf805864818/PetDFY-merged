@@ -1324,6 +1324,8 @@ static BOOL PDIsDeviceLocked(void) {
             return;
         }
         if (PDInstallCombinedArchive()) {
+            // 重置轮询标志：start 会重新调用本方法，否则第二次导入就没人扫了
+            polling = NO;
             dispatch_async(dispatch_get_main_queue(), ^{
                 PDOverlayController *strong = weakSelf;
                 if (!strong) return;
@@ -1331,7 +1333,7 @@ static BOOL PDIsDeviceLocked(void) {
                 [strong setStarted:NO];
                 [strong start];
             });
-            return;   // start 会重新启动轮询
+            return;
         }
         [s pd_startAssetImportPolling];
     });
