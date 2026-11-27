@@ -27,7 +27,7 @@ extern NSString *PDLocalizedString(NSString *key);
     if (self) {                                                          // 0x9eac cbz
         // 0x9eb0..0x9ec4: [specifier setProperty:@(32.0) forKey:@"height"]
         //   @0x53610 = NSConstantDoubleNumber 实例，值 32.0 在其 +8；key @0x4e018 "height"
-        [a3 setProperty:@(32.0) forKey:@"height"];
+        [(PSSpecifier *)a3 setProperty:@(32.0) forKey:@"height"];
         [self setSelectionStyle:0];                                      // 0x9ec8（UITableViewCellSelectionStyleNone）
         [self setUserInteractionEnabled:NO];                             // 0x9ed4（w2 = #0）
         [[self textLabel] setHidden:YES];                                // 0x9ee0（w2 = #1）
