@@ -368,7 +368,7 @@ NSDictionary<NSString *, NSArray *> *PDAIParseScript(NSString *script)
     NSUInteger length = text.length;
     while (i < length) {
         unichar c = [text characterAtIndex:i];
-        if (c == '【') {
+        if (c == 0x3010) {   // 【 U+3010
             // 【词, 词】整组先做，然后换新气泡
             NSRange found = [text rangeOfString:@"】"
                                         options:0
@@ -799,7 +799,7 @@ NSArray *PDAIContextSinceLastDelivery(NSArray *messages)
             if (!PDAIAttachmentIsImage(att))
                 [kept addObject:att];
         }
-        if (kept.count == attachments.count)
+        if ([(NSArray *)kept count] == [(NSArray *)attachments count])
             continue;
         if (!copy)
             copy = [messages mutableCopy];
