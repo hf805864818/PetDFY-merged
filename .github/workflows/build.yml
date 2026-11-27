@@ -75,9 +75,16 @@ jobs:
           [ -d "$THEOS/makefiles" ] || git clone --depth 1 https://github.com/theos/makefiles.git "$THEOS/makefiles"
           # theos 默认找自带 toolchain（submodule 未拉全时不存在）→ 用系统 clang/lld 顶替
           mkdir -p "$THEOS/toolchain/linux/iphone/bin"
-          for t in clang clang++ llvm-lipo llvm-strip llvm-objcopy llvm-ar dsymutil; do
+          for t in clang clang++ llvm-lipo llvm-strip llvm-objcopy llvm-ar llvm-nm dsymutil; do
             if command -v "$t" >/dev/null 2>&1; then
               ln -sf "$(command -v "$t")" "$THEOS/toolchain/linux/iphone/bin/$t"
+            fi
+          done
+          # theos 还会用裸名 lipo / strip / nm / ar / objcopy
+          for pair in lipo:llvm-lipo strip:llvm-strip nm:llvm-nm ar:llvm-ar objcopy:llvm-objcopy; do
+            src="${pair%%:*}"; dst="${pair##*:}"
+            if [ -e "$THEOS/toolchain/linux/iphone/bin/$dst" ]; then
+              ln -sf "$THEOS/toolchain/linux/iphone/bin/$dst" "$THEOS/toolchain/linux/iphone/bin/$src"
             fi
           done
           # Mach-O 链接必须用 ld64.lld；系统 ld 是 GNU ld（emulation 不兼容，报 unrecognised emulation mode: llvm）
