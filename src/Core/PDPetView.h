@@ -130,6 +130,14 @@
 - (void)setTapEligible:(BOOL)arg1;
 - (BOOL)menuPressActive;
 - (void)setMenuPressActive:(BOOL)arg1;
+
+#pragma mark - 逐帧动作（接 PDFramePlayer）
+
+/// 按运动模式挑一个 clip 播放（walk/run/sleep/sit/drag/land/jump/spin → 对应动作组）。
+- (void)playClipForMode:(NSString *)mode;
+
+/// 直接播指定 clip（素材 clips.plist 里的键）。
+- (void)playClipID:(NSString *)clipID;
 @end
 
 
@@ -153,13 +161,6 @@
 /// iOS 私有：UIPanGestureRecognizer 的最小移动距离
 @interface UIPanGestureRecognizer (PDPrivate)
 - (void)setAllowableMovement:(CGFloat)movement;
-
-#pragma mark - 逐帧动作（接 PDFramePlayer）
-
-/// 按运动模式挑一个 clip 播放（walk/run/sleep/sit/drag/land/jump/spin → 对应动作组）。
-- (void)playClipForMode:(NSString *)mode;
-
-/// 直接播指定 clip（素材 clips.plist 里的键）。
-- (void)playClipID:(NSString *)clipID;
-
 @end
+
+
