@@ -71,6 +71,14 @@ jobs:
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           # vendor 缺的 makefile 子模块兜底
           [ -d "$THEOS/makefiles" ] || git clone --depth 1 https://github.com/theos/makefiles.git "$THEOS/makefiles"
+          # theos 默认找自带 toolchain（submodule 未拉全时不存在）→ 用系统 clang/lld 顶替
+          mkdir -p "$THEOS/toolchain/linux/iphone/bin"
+          for t in clang clang++ ld64.lld ld llvm-lipo llvm-strip llvm-objcopy llvm-ar dsymutil; do
+            if command -v "$t" >/dev/null 2>&1; then
+              ln -sf "$(command -v "$t")" "$THEOS/toolchain/linux/iphone/bin/$t"
+            fi
+          done
+          ls -l "$THEOS/toolchain/linux/iphone/bin" | head -12
 
       - name: Fetch iOS SDK
         run: |
