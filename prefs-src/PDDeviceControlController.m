@@ -10,7 +10,6 @@ extern NSString *PDLocalizedString(NSString *key);
 
 // 头文件把本类写成 NSObject 子类（二进制里是 PSListController，super 派发走
 // _OBJC_CLASS_$_PDDeviceControlController；0x58360）。补齐声明以便编译与 super 派发。
-@end
 
 @implementation PDDeviceControlController
 
@@ -32,5 +31,4 @@ extern NSString *PDLocalizedString(NSString *key);
 - (void)installHeader {
     // 二进制为单条 ret，空实现。
 }
-
 @end
