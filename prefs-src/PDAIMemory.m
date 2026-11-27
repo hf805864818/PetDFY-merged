@@ -46,6 +46,8 @@ extern NSString *PDAIOrientation(void);
 // imp 0x1b324  id PDMemoryFail(NSString *message, NSError **error)
 //   域 "com.susudear.petdfy.memory"，code 1，userInfo = @{ NSLocalizedDescriptionKey: message }
 //   始终返回 nil（调用方写成 `return PDMemoryFail(...)`）。
+static NSString *const kPDMemoryErrorDomain = @"com.susudear.petdfy.memory"; // 0x514b8
+
 static id PDMemoryFail(NSString *message, void *errorPtr) {
     NSError *__autoreleasing *error = (NSError *__autoreleasing *)errorPtr;
     if (error) {
@@ -57,9 +59,6 @@ static id PDMemoryFail(NSString *message, void *errorPtr) {
 }
 
 #pragma mark - 常量（__cfstring / __const）
-
-static NSString *const kPDMemoryErrorDomain;   // 前向声明（定义在下方）
-static NSString *const kPDMemoryErrorDomain = @"com.susudear.petdfy.memory"; // 0x514b8
 
 // NSDataWritingAtomic == 1（imp 0x1c8a4 / 0x1dddc 里的 w3 = 1）
 static const NSDataWritingOptions kPDMemoryWriteAtomic = NSDataWritingAtomic;
