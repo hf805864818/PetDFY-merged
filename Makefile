@@ -33,7 +33,9 @@ PetDFY_FRAMEWORKS = Foundation UIKit Metal MetalKit MetalPerformanceShaders Quar
                     CoreFoundation CoreText Accelerate
 PetDFY_PRIVATE_FRAMEWORKS = MobileCoreServices
 # -lz：PDZipExtract 的进程内 ZIP 解压依赖 libz（iOS SDK 自带 libz.tbd）
-PetDFY_LDFLAGS = -Wl,-undefined,dynamic_lookup -lz
+# -fuse-ld=lld：Darwin target 下 clang 会解析为 ld64.lld（Mach-O），
+# 否则 Linux 上会误用系统 GNU ld / ELF ld.lld，报 unknown argument '-dynamic'
+PetDFY_LDFLAGS = -Wl,-undefined,dynamic_lookup -lz -fuse-ld=lld
 PetDFY_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/tweak.mk
@@ -43,6 +45,7 @@ TWEAK_NAME = PDFYEnhance
 PDFYEnhance_FILES = src/Auxiliary/PDFYEnhance.m
 PDFYEnhance_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Isrc -Isrc/Core -Isrc/Sources -Ishim -Wno-error
 PDFYEnhance_FRAMEWORKS = Foundation UIKit
+PDFYEnhance_LDFLAGS = -fuse-ld=lld
 PDFYEnhance_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/tweak.mk
@@ -52,6 +55,7 @@ TWEAK_NAME = PDFYSecurity
 PDFYSecurity_FILES = src/Auxiliary/PDFYSecurity.m
 PDFYSecurity_CFLAGS = -fno-objc-arc -Isrc -Isrc/Core -Ishim -Wno-error
 PDFYSecurity_FRAMEWORKS = Foundation
+PDFYSecurity_LDFLAGS = -fuse-ld=lld
 PDFYSecurity_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/tweak.mk
