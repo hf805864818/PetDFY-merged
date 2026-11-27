@@ -113,7 +113,7 @@ extern NSString *PDLocalizedString(NSString *key);
 }
 
 // imp 0x00a8b0  types v16@0:8
-- (void).cxx_destruct {
+- (void)dealloc {
     // 0xa8b0..0xa8c0: objc_storeStrong(&infoButton, nil)
     _infoButton = nil;
 }
