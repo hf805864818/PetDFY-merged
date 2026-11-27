@@ -33,6 +33,7 @@
 #import "WNLiveRig.h"
 #import "WNMotion.h"
 #import "WNHitMask.h"
+#import "PDFramePlayer.h"
 #import <MetalKit/MetalKit.h>
 #import <UIKit/UIKit.h>
 #import <math.h>
@@ -48,12 +49,77 @@
 - (void)setDrawableSize:(CGSize)size;
 @end
 
+@interface PDPetView ()
+// 逐帧动作播放器（惰性创建，素材里没有 clips.plist 时永不实例化）
+@property (nonatomic, strong) PDFramePlayer *framePlayer;
+@end
+
 @implementation PDPetView
 
 // 头文件里 hash / superclass / description / debugDescription 四个 readonly 属性在二进制中
 // 没有对应 method_t（继承自 NSObject）。若不声明 @dynamic，clang 会自动合成它们并额外长出
 // 4 个 ivar，把 instanceSize 从 200 撑到 232，同时覆盖 NSObject 的实现。故在此抑制合成。
 @dynamic hash, superclass, description, debugDescription;
+
+#pragma mark - 逐帧动作
+
+/// 惰性建播放器：素材根由 PDFramePlayer 自己按 PDJailbreak 候选链找
+/// （<jbroot>/Library/Application Support/PetDFY.bundle 等），不需要外面传。
+- (PDFramePlayer *)pd_framePlayer {
+    if (_framePlayer) return _framePlayer;
+    _framePlayer = [[PDFramePlayer alloc] init];
+    _framePlayer.hidden = YES;
+    _framePlayer.userInteractionEnabled = NO;
+    _framePlayer.frame = self.bounds;
+    if (_framePlayer) {
+        __weak typeof(self) weakSelf = self;
+        _framePlayer.completion = ^{
+            weakSelf.framePlayer.hidden = YES;
+        };
+        [self addSubview:_framePlayer];
+    }
+    return _framePlayer;
+}
+
+- (void)playClipID:(NSString *)clipID {
+    if (![clipID isKindOfClass:[NSString class]] || clipID.length == 0) return;
+    PDFramePlayer *player = [self pd_framePlayer];
+    if (!player || ![player hasClips]) return;
+    player.frame = self.bounds;
+    player.hidden = NO;
+    [player playClip:clipID];
+}
+
+- (void)playClipForMode:(NSString *)mode {
+    PDFramePlayer *player = [self pd_framePlayer];
+    if (!player || ![player hasClips]) return;
+
+    NSArray<NSString *> *cands = nil;
+    if ([mode isEqual:@"walk"] || [mode isEqual:@"run"]) {
+        cands = @[@"move_run", @"move_happy", @"move_rush"];
+    } else if ([mode isEqual:@"sleep"]) {
+        cands = @[@"sleep_loop", @"idle_nap"];
+    } else if ([mode isEqual:@"sit"]) {
+        cands = @[@"idle_cat", @"idle_nap"];
+    } else if ([mode isEqual:@"drag"]) {
+        cands = @[@"drag_swing", @"squash"];
+    } else if ([mode isEqual:@"land"]) {
+        cands = @[@"skip_land", @"squash"];
+    } else if ([mode isEqual:@"jump"]) {
+        cands = @[@"play_jump", @"skip_land"];
+    } else if ([mode isEqual:@"spin"]) {
+        cands = @[@"spin", @"play_spin_top"];
+    } else {
+        cands = @[@"idle", @"idle_bubble", @"idle_dance", @"idle_hum",
+                  @"idle_mirror", @"idle_stretch2", @"idle_wake",
+                  @"poke_wave", @"poke_happy", @"note"];
+    }
+    NSString *pick = cands[arc4random_uniform((uint32_t)cands.count)];
+    player.frame = self.bounds;
+    player.hidden = NO;
+    [player playClip:pick];
+}
+
 
 #pragma mark - 初始化
 
