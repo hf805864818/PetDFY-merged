@@ -46,6 +46,7 @@
 - (id)propertyForKey:(NSString *)key;
 - (void)setProperty:(id)value forKey:(NSString *)key;
 - (void)removePropertyForKey:(NSString *)key;
+- (void)performSetterWithValue:(id)value;
 - (NSDictionary *)titleDictionary;
 - (void)setTitleDictionary:(NSDictionary *)dict;
 - (NSDictionary *)shortTitleDictionary;
@@ -110,6 +111,8 @@
 @end
 
 @interface PSSliderTableCell : PSTableCell
+- (id)control;
+- (void)setControl:(id)control;
 - (void)controlChanged:(id)sender;
 @end
 
