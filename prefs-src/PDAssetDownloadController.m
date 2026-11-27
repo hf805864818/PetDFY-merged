@@ -4,6 +4,8 @@
 //
 #import "PDAssetDownloadController.h"
 
+extern NSString *PDLocalizedString(NSString *key);
+
 @implementation PDAssetDownloadController
 
 // imp 0x007e7c  types @16@0:8
