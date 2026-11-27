@@ -21,7 +21,6 @@ extern void PDAIWritePreferences(NSDictionary *values);            // imp 0x1343
 // 头文件把本类写成 NSObject 子类（二进制里其实是 PSListController，super 派发
 // 走 _OBJC_CLASS_$_PDSpeechSettingsController；0x58350）。为可编译+可 super 派发，
 // 在此补齐父类与框架方法声明，不实现。
-@end
 
 @implementation PDSpeechSettingsController
 
@@ -148,5 +147,4 @@ extern void PDAIWritePreferences(NSDictionary *values);            // imp 0x1343
 
     [super setPreferenceValue:value specifier:specifier];
 }
-
 @end
