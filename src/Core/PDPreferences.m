@@ -24,6 +24,7 @@
 //
 
 #import "PDPreferences.h"
+#import "PDJailbreak.h"
 #import "PDOutfitCatalog.h"      // 【可编辑化】服装白名单改为动态发现
 #import "PDTextureResolver.h"
 #import "PDLayoutConfig.h"
@@ -61,8 +62,13 @@ static double PDReadNumber(NSString *key, double def, double lo, double hi) {
 }
 
 // 【可编辑化扩展】资源根：与安装布局一致（Debian 包安装到 /Library/Application Support/）
+// RootHide 下 /Library 是系统只读、真身在 jbroot，必须经 PDJailbreak 展开。
 static NSString *PDPrefAssetsRoot(void) {
-    return @"/Library/Application Support/PetDFY.bundle";
+    NSArray<NSString *> *cands = PDJailbreakCandidates(@"/Library/Application Support/PetDFY.bundle");
+    for (NSString *p in cands) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p]) return p;
+    }
+    return cands.firstObject ?: @"/Library/Application Support/PetDFY.bundle";
 }
 
 /// 服装取值：允许任意非空字符串，但要求它在本机素材里真实存在（model.json 或 outfits/ 目录），
