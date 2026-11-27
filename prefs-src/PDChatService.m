@@ -11,6 +11,7 @@
 
 #include <math.h>
 
+#import <Foundation/Foundation.h>
 #import "PDChatService.h"
 #import "PDSupport.h"
 #import "PDAIMemory.h"
@@ -618,7 +619,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
             }
             NSInteger status = 0;
             if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                status = [response statusCode];
+                status = [(NSHTTPURLResponse *)response statusCode];
             }
             if (err == nil && (status < 200 || status > 299)) {
                 // 非 2xx：从 {"error":{"message":…}} 里取文案，缺省用状态码
@@ -1228,7 +1229,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             NSInteger status = 0;
             if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                status = [response statusCode];
+                status = [(NSHTTPURLResponse *)response statusCode];
             }
             id json = nil;
             if ([data length] != 0) {
@@ -1566,7 +1567,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
     done(@"宠物运行时未连接。", YES);
 }
 
-﻿// imp 0x00ae5c  types v24@0:8@16
+// imp 0x00ae5c  types v24@0:8@16
 - (void) handleDataMaintenanceRequest:(id)a1 {
     if (![NSThread isMainThread]) {
         // 原实现埋的 assert，文件名/行号取自二进制里的字面量
