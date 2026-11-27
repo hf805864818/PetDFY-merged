@@ -1663,6 +1663,12 @@ static BOOL PDIsDeviceLocked(void) {
         [self layoutPet];                                                // 0xc584-0xc588
         return;                                                          // 0xc58c
     }
+    // 逐帧动作：双击 / 脚本命令 "clip" → 按当前运动模式挑一组 WebP 序列播放
+    if ([command isKindOfClass:[NSString class]] && [command isEqual:@"clip"]) {
+        [self.pet playClipForMode:motion.mode ?: @"idle"];
+        return;
+    }
+
     if ([motion doWord:command]) {                                       // 0xc590-0xc59c 其余命令都当「动作词」
         [motion setRoamHoldUntil:motion.roamHoldUntil + 8.0];            // 0xc5a0-0xc5bc fmov d1,#8.0 → fadd → setter
         return;
