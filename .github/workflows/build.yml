@@ -81,6 +81,11 @@ jobs:
             fi
           done
           # Mach-O 链接必须用 ld64.lld；系统 ld 是 GNU ld（emulation 不兼容，报 unrecognised emulation mode: llvm）
+          # theos 用裸名 strip 调用，缺它会在 Stripping 阶段 Error 127
+          if command -v llvm-strip >/dev/null 2>&1; then
+            ln -sf "$(command -v llvm-strip)" "$THEOS/toolchain/linux/iphone/bin/strip"
+            ln -sf "$(command -v llvm-strip)" "$THEOS/toolchain/linux/iphone/bin/llvm-strip"
+          fi
           if command -v ld64.lld >/dev/null 2>&1; then
             for n in ld ld.lld ld64.lld; do
               ln -sf "$(command -v ld64.lld)" "$THEOS/toolchain/linux/iphone/bin/$n"
