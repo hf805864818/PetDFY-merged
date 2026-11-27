@@ -50,7 +50,7 @@ echo "目标: $TRIPLE"
     -Wno-nullability-completeness -Wno-objc-multiple-method-names \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -I prefs-src -I prefs-shim \
-    -dynamiclib -install_name @rpath/PetDFYPrefs.dylib \
+    -dynamiclib -fuse-ld=lld -install_name @rpath/PetDFYPrefs.dylib \
     -framework Foundation -framework UIKit -framework CoreGraphics \
     -framework AVFoundation -framework ImageIO -framework UniformTypeIdentifiers \
     -framework Preferences -framework CoreFoundation \
