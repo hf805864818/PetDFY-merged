@@ -12,8 +12,6 @@
 - (void)viewDidLayoutSubviews;
 - (void) viewDidAppear:(BOOL)a1;
 - (void)save;
-- (id)memory;
-- (void) setMemory:(id)a1;
 - (id)path;
 - (void) setPath:(id)a1;
 - (id)original;
