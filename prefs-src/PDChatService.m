@@ -119,7 +119,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
 // imp 0x00d3b8  types B16@0:8
 - (BOOL)isConfigured {
     CFPreferencesAppSynchronize(PDPreferencesDomainRef());
-    if (![[PDAIPreference(@"AIEnabled", (id)kCFBooleanTrue) boolValue]]) {
+    if (![[PDAIPreference(@"AIEnabled", @YES) boolValue]]) {
         return NO;
     }
     NSString *base = PDAIString(PDAIPreference(@"AIBaseURL", @""));
@@ -519,7 +519,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
         [self enqueueEvent:a1 wake:YES preempt:NO];
         return;
     }
-    if (![[PDAIPreference(@"AIAcceptImages", (id)kCFBooleanFalse) boolValue]]) {
+    if (![[PDAIPreference(@"AIAcceptImages", @NO) boolValue]]) {
         [self finish:[self error:@"请先在供应商设置中开启“接受图片”。" code:0xc]];
         return;
     }
@@ -965,7 +965,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
                                                            localHandoffText];
             [working insertObject:@{ @"role" : @"user",
                                      @"content" : content,
-                                     @"_handoff" : (id)kCFBooleanTrue }
+                                     @"_handoff" : @YES }
                           atIndex:0];
         }
 
@@ -1402,7 +1402,7 @@ static void PDWaitDataMaintenanceResult(NSString *requestID, double expires, id 
                    && [includeScreenshot boolValue]) {
             wantsImage = YES;
         }
-        if (wantsImage && ![[PDAIPreference(@"AIAcceptImages", (id)kCFBooleanFalse) boolValue]]) {
+        if (wantsImage && ![[PDAIPreference(@"AIAcceptImages", @NO) boolValue]]) {
             done(@"请在供应商设置中开启“接受图片”并选择支持图片的模型，才能读取截图。", YES);
             return;
         }
