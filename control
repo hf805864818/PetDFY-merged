@@ -1,0 +1,9 @@
+Package: com.ojbkclub.petdfy
+Name: 大肥鱼〇V〇
+Version: 0.1.9-merge2
+Architecture: iphoneos-arm64e
+Description: 大肥鱼〇V〇 桌面宠物 — 合并版源码（build.077 可编辑基线 + 第一套 RootHide 素材导入 + 第四套 PetDFYPrefs/petdfy-voice 源码还原）。
+Maintainer: hf805864818
+Author: 屿哥精选（原作） / 逆向重建
+Section: Tweaks
+Depends: mobilesubstrate | ellekit | libhooker, preferenceloader, firmware (>= 16.0)

@@ -1,3 +1,0 @@
-# PetDFY merged
-
-bootstrap

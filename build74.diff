@@ -1,0 +1,446 @@
+--- a/src/Core/PDBootstrap.m
++++ b/src/Core/PDBootstrap.m
+@@ -31,7 +31,7 @@
+     }
+ }
+ 
+-static NSString * const kPDBuildTag = @"build.073";
++static NSString * const kPDBuildTag = @"build.074";
+ 
+ static int PDBootReadAttempts(void) {
+     NSString *s = [NSString stringWithContentsOfFile:kPDBootStatePath
+@@ -89,7 +89,7 @@
+                    encoding:NSUTF8StringEncoding
+                       error:NULL];
+ 
+-        PDInitLog(@"=== PetDFY build.073 bootstrap pid=%d ===", getpid());
++        PDInitLog(@"=== PetDFY build.074 bootstrap pid=%d ===", getpid());
+         if (!PDBootGuardAllow()) {
+             return;
+         }
+--- a/src/Core/PDOverlayController.m
++++ b/src/Core/PDOverlayController.m
+@@ -263,13 +263,18 @@
+             PDOverlayController *strong = weakSelf;
+             if (strong) [strong performCommand:action];
+         };
+-    }
+-
++        PDInitLog(@"pet callbacks: OK");
++    }
++
++    PDInitLog(@"ensureWindow: finish begin");
+     // 首次挂载后的收尾（0x7? 段：方向/键盘/布局/外观）
+     [[self orientationMonitor] pd_refresh];
++    PDInitLog(@"ensureWindow: orientation OK");
+     [self rotateHostWindowWithDuration:0.0];
++    PDInitLog(@"ensureWindow: rotate OK");
+     [self setLastSize:CGSizeZero];
+     [self applyAppearance];
++    PDInitLog(@"ensureWindow: appearance OK");
+     [self layoutPet];
+     [self hideHoverButtons];
+     (void)[self description];
+@@ -283,19 +288,20 @@
+ 
+ /// 114 条指令。找当前活跃的窗口场景。
+ - (UIWindowScene *)mainScene {
+-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+-        UIWindowScene *ws = (UIWindowScene *)s;
++    UIWindowScene *fallback = nil;
++    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
++        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
++        NSString *name = NSStringFromClass([scene class]);
++        if ([name containsString:@"SystemAperture"] || [name containsString:@"Curtain"] ||
++            [name containsString:@"CoverSheet"] || [name containsString:@"LockScreen"]) continue;
++        UIWindowScene *ws = (UIWindowScene *)scene;
++        if ([name isEqualToString:@"SBWindowScene"] &&
++            ws.activationState == UISceneActivationStateForegroundActive) return ws;
++        if (!fallback && ws.activationState != UISceneActivationStateUnattached) fallback = ws;
+         if (ws.activationState == UISceneActivationStateForegroundActive) return ws;
+     }
+-    // 回退：任意 window scene
+-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+-        if ([s isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)s;
+-    }
+-    return nil;
+-
+-    Class cls = NSClassFromString(@"UIWindowScene");
+-    (void)cls;
++    PDDiag(@"mainScene: no desktop scene, fallback=%@", fallback ? NSStringFromClass([fallback class]) : @"nil");
++    return fallback;
+ }
+ 
+ 
+@@ -340,14 +346,14 @@
+     // 2) 建资源管理器
+     if (!_assets) {
+         _assets = [PDAssetManager new];
+-        PDDiag(@"start build.072 stage: assets readyHandler");
++        PDDiag(@"start build.074 stage: assets readyHandler");
+         // build.070：readyHandler 不捕获任何对象。069 在这里复制 weakSelf block 时，
+         // libsystem_blocks 的 _call_custom_copy_helper 直接 SIGBUS，SpringBoard 进安全模式。
+         _assets.readyHandler = ^(BOOL active, NSDictionary *state) {
+             (void)state;
+             if (!active) [[PDOverlayController sharedController] updateVisibility];
+         };
+-        PDDiag(@"start build.072 stage: assets readyHandler OK");
++        PDDiag(@"start build.074 stage: assets readyHandler OK");
+     }
+ 
+     // 3) 建窗口
+@@ -368,9 +374,8 @@
+             [weakSelf rotateHostWindowWithDuration:d];
+         };
+         id boxedOri = (id)oriHandler;
+-        object_setIvar(_orientationMonitor,
+-                       class_getInstanceVariable([PDActiveInterfaceOrientationMonitor class], "_changeHandler"),
+-                       boxedOri);
++        [_orientationMonitor setChangeHandler:oriHandler];
++        (void)boxedOri;
+     }
+     if (!_keyboardMonitor) {
+         _keyboardMonitor = [PDKeyboardMonitor new];
+@@ -787,9 +792,9 @@
+ 
+     // [build.057] 先把 AI 运行时旁路，确认可见性链本身能跑完。
+     // AI 的 setVisible/poll 会触发 service/配置加载，疑似在主线程阻塞（无崩溃日志、直接看门狗）。
+-    PDDiag(@"show step5: ai skipped");
+-    // [[self ai] setVisible:YES];                            // 0xaa18
+-    // [[self ai] poll];                                      // 0xaa34
++    PDDiag(@"show step5: ai visible");
++    [[self ai] setVisible:YES];
++    [[self ai] poll];
+ 
+     if (wasHidden) {                                       // 0xaa38
+         PDDiag(@"show step6: applyAppearance");
+@@ -1053,14 +1058,13 @@
+                 }
+             }
+         }
+-        if (![self.window pdAllowsKey]) {
+-            self.window.pdAllowsKey = YES;
+-            [self.window resignKeyWindow];
+-            [self.previousKeyWindow makeKeyWindow];
+-        }
++        self.window.pdAllowsKey = YES;
++        [self.window makeKeyWindow];
+     } else {
+         self.window.pdAllowsKey = NO;
+-        [self.window makeKeyWindow];
++        [self.window resignKeyWindow];
++        [self.previousKeyWindow makeKeyWindow];
++        self.previousKeyWindow = nil;
+     }
+ }
+ 
+@@ -1128,7 +1132,8 @@
+     }];
+ 
+     // 属性声明是 void (^)(NSString *, BOOL)，块体实测无参（0x8d98 只读捕获，不读 x2/x3）
+-    [chat setTalkHandler:(void (^)(NSString *, BOOL))^{   // 0x8688 块 0x8d98（无参）
++    [chat setTalkHandler:^(NSString *text, BOOL active) {
++        (void)text; (void)active;   // 0x8688 块 0x8d98（无参）
+         PDOverlayController *s = weakSelf;
+         if (s == nil) {
+             return;
+@@ -1141,7 +1146,8 @@
+         [[[[pet renderer] liveRig] motion] setTalkPulse:1.0];
+     }];
+ 
+-    [chat setSendHandler:(void (^)(NSString *))^(NSString *text, NSArray *images) {       // 0x86c8 块 0x8e50
++    [chat setSendHandler:^(NSString *text) {
++        NSArray *images = @[];       // 0x86c8 块 0x8e50
+         PDOverlayController *s = weakSelf;
+         if (s == nil) {
+             return;
+@@ -1149,7 +1155,8 @@
+         [[s ai] sendText:text images:images];           // 0x8f1c（x2=text, x3=images）
+     }];
+ 
+-    [chat setAnswerHandler:(void (^)(NSString *))^(NSString *answer, long long index, NSString *text, BOOL dismissed) {   // 0x8708 块 0x8ed8
++    [chat setAnswerHandler:^(NSString *answer) {
++        long long index = 0; NSString *text = answer; BOOL dismissed = NO;   // 0x8708 块 0x8ed8
+         PDOverlayController *s = weakSelf;
+         if (s == nil) {
+             return;
+@@ -1544,9 +1551,17 @@
+     // build.069：命令来自可见宠物；不再让误判的锁屏探针吞掉点击。
+     [self updateVisibility];                                             // 0xc474-0xc478
+     if (!self.pet) return;                                               // 0xc47c-0xc490 cbz x20
+-    if ([command isEqual:@"chat"]) {                                     // 0xc494-0xc4a4 @fb030
+-        [self showChat];                                                 // 0xc4a8
+-        return;                                                          // 0xc4b0
++    if ([command isEqual:@"chat"]) {
++        [self showChat];
++        return;
++    }
++    if ([command isEqual:@"voice"]) {
++        [self showVoiceInput];
++        return;
++    }
++    if ([command isEqual:@"menu"]) {
++        [self petHoverChanged:YES point:CGPointZero];
++        return;
+     }
+     [self.pet cancelInteraction];                                        // 0xc4b4-0xc4c8 任何非 chat 命令先掐掉当前交互
+     WNMotion *motion = self.pet.renderer.liveRig.motion;                 // 0xc4cc-0xc508（renderer→liveRig→motion）
+--- a/src/Core/PDPetView.m
++++ b/src/Core/PDPetView.m
+@@ -325,21 +325,21 @@
+     NSInteger maxFPS = 60;
+     UIScreen *screen = [[self window] screen] ?: [UIScreen mainScreen];
+     if ([screen respondsToSelector:@selector(maximumFramesPerSecond)]) {
+-        maxFPS = (NSInteger)[screen maximumFramesPerSecond];
++        maxFPS = MIN(60, (NSInteger)[screen maximumFramesPerSecond]);
+     }
+     NSInteger fps = 30;
+     if ([mode isEqualToString:@"sleep"]) fps = 15;
+     else if ([mode isEqualToString:@"sit"]) fps = 24;
+-    else if (![mode isEqualToString:@"idle"]) fps = maxFPS;
++    else if (![mode isEqualToString:@"idle"]) fps = MIN(60, maxFPS);
+     if ([self activeTouch] || [self layoutAnimating] || [self menuPressActive] ||
+-        _renderer.liveRig.motion.pulse) fps = maxFPS;
++        _renderer.liveRig.motion.pulse) fps = MIN(60, maxFPS);
+ 
+     if (fps != _activeFPS) {
+         _activeFPS = fps;
+         self.preferredFramesPerSecond = fps;
+     }
+     [_renderer setSimulationFPS:MAX(30, fps)];
+-    [_renderer setPresentationFPS:maxFPS];
++    [_renderer setPresentationFPS:MIN(60, maxFPS)];
+     _updatingFrameRate = NO;
+ }
+ 
+@@ -739,10 +739,10 @@
+ }
+ - (void)setStroking:(BOOL)v { _stroking = v; }
+ - (void)setGestureActionHandler:(void (^)(NSString *, CGPoint))v { _gestureActionHandler = [v copy]; }
+-- (void)setFrameHandler:(id)v { _frameHandler = v; }
+-- (void)setBeforeFrameHandler:(id)v { _beforeFrameHandler = v; }
+-- (void)setHoverHandler:(id)v { _hoverHandler = v; }
+-- (void)setBubblePositionHandler:(id)v { _bubblePositionHandler = v; }
++- (void)setFrameHandler:(id)v { _frameHandler = [v copy]; }
++- (void)setBeforeFrameHandler:(id)v { _beforeFrameHandler = [v copy]; }
++- (void)setHoverHandler:(id)v { _hoverHandler = [v copy]; }
++- (void)setBubblePositionHandler:(id)v { _bubblePositionHandler = [v copy]; }
+ - (void)setHasLastBubblePosition:(BOOL)v { _hasLastBubblePosition = v; }
+ - (void)setLastHoverReach:(double)v { _lastHoverReach = v; }
+ - (void)setHasLastHoverPosition:(BOOL)v { _hasLastHoverPosition = v; }
+--- a/src/Core/PDAssetManager.m
++++ b/src/Core/PDAssetManager.m
+@@ -266,8 +266,8 @@
+ 
+ #pragma mark - 二进制存取器（逐条 8-16 指令，纯 ivar 读写）
+ - (void)setReady:(BOOL)v { _ready = v; }
+-- (void)setReadyHandler:(void (^)(BOOL, NSDictionary *))v { _readyHandler = v; }
+-- (void)setWillChangeHandler:(void (^)(NSDictionary *))v { _willChangeHandler = v; }
++- (void)setReadyHandler:(void (^)(BOOL, NSDictionary *))v { _readyHandler = [v copy]; }
++- (void)setWillChangeHandler:(void (^)(NSDictionary *))v { _willChangeHandler = [v copy]; }
+ - (void)setQueue:(id)v { _queue = v; }
+ - (void)setHelper:(id)v { _helper = v; }
+ 
+--- a/src/Core/WNMotion+Input.m
++++ b/src/Core/WNMotion+Input.m
+@@ -175,7 +175,7 @@
+     _responsiveInteraction = YES;
+     p.dx = p.x;
+     p.dy = p.fy;
+-    [self grab];
++    // 按下先保持原姿态，移动超过阈值才抓取；否则普通单击也会被当成投掷。
+     return YES;
+ }
+ 
+@@ -191,12 +191,16 @@
+     pointerVX = [self velocity].x;
+     if (!pressing) return;
+ 
++    if (![_mode isEqualToString:@"drag"] && ![_mode isEqualToString:@"hold"] &&
++        hypot(pt.x - pressX, pt.y - pressY) > 6.0) {
++        [self grab];
++    }
++
+     if ([_mode isEqualToString:@"drag"] || [_mode isEqualToString:@"hold"]) {
+         double nextX = p.dx + (pt.x - pressX);
+         double nextY = p.dy + (pt.y - pressY);
+         p.x = fmax([self minX], fmin([self maxX], nextX));
+         p.fy = fmax(32.0, fmin(floorY, nextY));
+-        p.gy = p.fy;
+         p.facing = (fabs(pt.x - pressX) > 1.0) ? copysign(1.0, pt.x - pressX) : p.facing;
+     }
+ }
+@@ -204,6 +208,9 @@
+ 
+ 
+ - (void)pointerUp:(CGPoint)pt milliseconds:(double)ms {
++    [self samplePointer:pt milliseconds:ms];
++    CGPoint v = [self velocity];
++    BOOL wasDragging = [_mode isEqualToString:@"drag"] || [_mode isEqualToString:@"hold"];
+     pointerX = pt.x;
+     pointerY = pt.y;
+     pressing = NO;
+@@ -212,9 +219,25 @@
+     p.target = p.x;
+     p.targetY = p.gy;
+     p.speed = 0.0;
+-    [self setAirKind:nil];
+-    [self setExpression:nil];
+-    [self setModeTo:@"idle"];
++
++    if (wasDragging) {
++        // 松手速度直接驱动空中姿态；轻放也会进入 drop，不再瞬间切回 idle。
++        double vx = fmax(-1400.0, fmin(1400.0, v.x));
++        double vy = fmax(-1500.0, fmin(1800.0, v.y));
++        BOOL thrown = hypot(vx, vy) > 180.0 || fabs(pt.y - pressY) > 36.0;
++        p.vx = thrown ? vx : 0.0;
++        p.vy = thrown ? vy : 80.0;
++        [self setAirKind:thrown ? @"throw" : @"drop"];
++        [self setExpression:thrown ? @"surprised" : @"dragged"];
++        [self setModeTo:@"air"];
++        [self sound:thrown ? @"throw" : @"drop" kind:@"move" arguments:@[]];
++        [self event:thrown ? @"throw" : @"drop"
++             detail:@{@"vx": @(p.vx), @"vy": @(p.vy)}];
++    } else {
++        [self setAirKind:nil];
++        [self setExpression:nil];
++        [self setModeTo:@"idle"];
++    }
+     _roamHoldUntil = time + 1.0;
+ }
+ 
+--- a/src/Core/WNMotion+Step.m
++++ b/src/Core/WNMotion+Step.m
+@@ -267,6 +267,23 @@
+     }
+ 
+ motion_common:;
++    // 拖拽松手后的空中物理：坐标系 y 向下，重力为正，落地交给 land 统一发动作/声音。
++    if ([mode isEqualToString:@"air"]) {
++        double airDt = fmin(dt, 0.033);
++        p.vy = fmin(2200.0, p.vy + 1850.0 * airDt);
++        p.x += p.vx * airDt;
++        p.fy += p.vy * airDt;
++        p.vx *= exp(-0.32 * airDt);
++        double minX = [self minX], maxX = [self maxX];
++        if (p.x < minX || p.x > maxX) {
++            p.x = fmax(minX, fmin(maxX, p.x));
++            p.vx = -p.vx * 0.38;
++            [self dust:2.0 spread:24.0];
++        }
++        if (p.vy >= 0.0 && p.fy >= p.gy) [self land];
++        mode = _mode;
++    }
++
+     // ---- 脉冲动画 [0x473dc → 0x47510] ----
+     // d11/d13 是叠加到最终姿态的升降/倾斜偏移，本段只负责按 pulse 进度累加。
+     double flapLift = 0.0;                          // [0x473d0] movi d11, 0
+@@ -320,6 +337,7 @@
+     }
+ 
+     if ([mode isEqualToString:@"look"] && p.modeT > 1.2) [self setModeTo:@"idle"];
++    if ([mode isEqualToString:@"land"] && p.modeT > 0.65) [self setModeTo:@"idle"];
+     if (p.exprUntil > 0.0 && time >= p.exprUntil) {
+         p.exprUntil = 0.0;
+         [self setExpression:nil];
+--- a/src/Sources/PDAIPetRuntime.m
++++ b/src/Sources/PDAIPetRuntime.m
+@@ -1268,10 +1268,10 @@
+ 
+ #pragma mark - 二进制存取器（逐条 8-16 指令，纯 ivar 读写）
+ - (void)setService:(id)v { _service = v; }
+-- (void)setPresentationHandler:(id)v { _presentationHandler = v; }
+-- (void)setTurnHandler:(id)v { _turnHandler = v; }
+-- (void)setPreferencesHandler:(id)v { _preferencesHandler = v; }
+-- (void)setDevicePreparationHandler:(id)v { _devicePreparationHandler = v; }
++- (void)setPresentationHandler:(id)v { _presentationHandler = [v copy]; }
++- (void)setTurnHandler:(id)v { _turnHandler = [v copy]; }
++- (void)setPreferencesHandler:(id)v { _preferencesHandler = [v copy]; }
++- (void)setDevicePreparationHandler:(id)v { _devicePreparationHandler = [v copy]; }
+ - (void)setDeviceTools:(id)v { _deviceTools = v; }
+ - (void)setAlarms:(id)v { _alarms = v; }
+ - (void)setActions:(id)v { _actions = v; }
+--- a/src/Sources/PDChatController.m
++++ b/src/Sources/PDChatController.m
+@@ -847,6 +847,10 @@
+ 
+     // ---- 0x18c? 起：给云语音输入装三组回调，再按语言启动 ----
+     PDCloudVoiceInput *dictation = (PDCloudVoiceInput *)[self dictation];
++    if (!dictation) {
++        dictation = [PDCloudVoiceInput new];
++        [self setDictation:dictation];
++    }
+     __weak typeof(self) weakSelf = self;
+     if ([dictation isKindOfClass:[PDCloudVoiceInput class]]) {
+         NSInteger request = [self dictationRequest];
+@@ -1167,9 +1171,15 @@
+     [[self inputFrame] setHidden:NO];
+     [[self closeButton] setHidden:NO];
+     // 0xfc670
+-    [[self composer] setText:PDLocalizedString(@"输入想说的话…")];
++    [[self composer] setText:@""];
++    [[(PDComposerTextView *)[self composer] placeholder] setText:PDLocalizedString(@"输入想说的话…")];
++    [[(PDComposerTextView *)[self composer] placeholder] setHidden:NO];
+     [self setThinking:NO];
+     [[self view] setNeedsLayout];
++    __weak typeof(self) weakSelf = self;
++    dispatch_async(dispatch_get_main_queue(), ^{
++        [weakSelf.composer becomeFirstResponder];
++    });
+ 
+     if (![[self replyBubble] isHidden]) [[self replyBubble] setHidden:YES];
+     (void)[[self placeholder] text];
+@@ -2216,14 +2226,14 @@
+ }
+ 
+ #pragma mark - 二进制存取器（逐条 8-16 指令，纯 ivar 读写）
+-- (void)setKeyboardFocusHandler:(id)v { _keyboardFocusHandler = v; }
+-- (void)setTalkHandler:(id)v { _talkHandler = v; }
+-- (void)setSendHandler:(id)v { _sendHandler = v; }
+-- (void)setAnswerHandler:(id)v { _answerHandler = v; }
+-- (void)setConfirmationShownHandler:(void (^)(NSString *))v { _confirmationShownHandler = v; }
+-- (void)setActionsHandler:(id)v { _actionsHandler = v; }
+-- (void)setBodyBusyProvider:(id)v { _bodyBusyProvider = v; }
+-- (void)setSoundEnabledProvider:(id)v { _soundEnabledProvider = v; }
++- (void)setKeyboardFocusHandler:(void (^)(BOOL))v { _keyboardFocusHandler = [v copy]; }
++- (void)setTalkHandler:(void (^)(NSString *, BOOL))v { _talkHandler = [v copy]; }
++- (void)setSendHandler:(void (^)(NSString *))v { _sendHandler = [v copy]; }
++- (void)setAnswerHandler:(void (^)(NSString *))v { _answerHandler = [v copy]; }
++- (void)setConfirmationShownHandler:(void (^)(NSString *))v { _confirmationShownHandler = [v copy]; }
++- (void)setActionsHandler:(void (^)(NSArray *))v { _actionsHandler = [v copy]; }
++- (void)setBodyBusyProvider:(BOOL (^)(void))v { _bodyBusyProvider = [v copy]; }
++- (void)setSoundEnabledProvider:(BOOL (^)(void))v { _soundEnabledProvider = [v copy]; }
+ - (void)setBeatIndex:(long long)v { _beatIndex = v; }
+ - (void)setAnchorIndex:(unsigned long long)v { _anchorIndex = v; }
+ - (void)setTurnBusy:(BOOL)v { _turnBusy = v; }
+@@ -2233,7 +2243,7 @@
+ - (void)setBubbleSpeed:(double)v { _bubbleSpeed = v; }
+ - (void)setPreparingImages:(BOOL)v { _preparingImages = v; }
+ - (void)setReturnSends:(BOOL)v { _returnSends = v; }
+-- (void)setDismissHandler:(id)v { _dismissHandler = v; }
++- (void)setDismissHandler:(void (^)(void))v { _dismissHandler = [v copy]; }
+ - (void)setAnswer:(id)v { _answer = v; }
+ - (void)setShownLength:(unsigned long long)v { _shownLength = v; }
+ - (void)setShownConfirmationID:(id)v { _shownConfirmationID = v; }
+--- a/src/Sources/PDCloudVoiceInput.m
++++ b/src/Sources/PDCloudVoiceInput.m
+@@ -767,7 +767,7 @@
+ /// （2 条：stp x29,x30,[sp,-0x10]! 之后直接 str x2,[x0,0xc0] 再 ret，无 copy/dispatch）。
+ /// 行为等价 → 改用 ivar 直写，省掉一次 Block_copy，与二进制逐条对齐。
+ - (void)setCompletionHandler:(void (^)(NSString *, NSError *))completionHandler {
+-    _completionHandler = completionHandler;
++    _completionHandler = [completionHandler copy];
+ }
+ 
+ @end
+--- a/layout/DEBIAN/control
++++ b/layout/DEBIAN/control
+@@ -1,6 +1,6 @@
+ Package: com.ojbkclub.petdfy
+ Name: 大肥鱼〇V〇
+-Version: 0.1.8-e2+build.073
++Version: 0.1.8-e2+build.074
+ Architecture: iphoneos-arm64e
+ Description: 大肥鱼〇V〇 桌面宠物 — 可编辑源码重建版（T3 基线）。包含 15 套服装素材、发色引擎、布局外置与两个辅助 dylib。
+ Maintainer: hf805864818

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PetDFYPrefs.bundle/Info.plist
+  Assumed：压缩包里只有 Mach-O，没有随包 Info.plist，以下键按 PreferenceBundle 惯例 +
+  二进制里的类名（PDRootListController 是 PSListController 子类、带 specifiers）推定。
+  装到 /Library/PreferenceBundles/PetDFYPrefs.bundle/ 后由 Settings.app 读取。
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleExecutable</key>
+	<string>PetDFYPrefs</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.susudear.petdfy.prefs</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>PetDFY</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.80</string>
+	<key>CFBundleVersion</key>
+	<string>80</string>
+	<key>NSPrincipalClass</key>
+	<string>PDRootListController</string>
+</dict>
+</plist>

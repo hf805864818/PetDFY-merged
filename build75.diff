@@ -1,0 +1,327 @@
+--- a/src/Core/PDBootstrap.m
++++ b/src/Core/PDBootstrap.m
+@@ -31,7 +31,7 @@
+     }
+ }
+ 
+-static NSString * const kPDBuildTag = @"build.074";
++static NSString * const kPDBuildTag = @"build.075";
+ 
+ static int PDBootReadAttempts(void) {
+     NSString *s = [NSString stringWithContentsOfFile:kPDBootStatePath
+@@ -89,7 +89,7 @@
+                    encoding:NSUTF8StringEncoding
+                       error:NULL];
+ 
+-        PDInitLog(@"=== PetDFY build.074 bootstrap pid=%d ===", getpid());
++        PDInitLog(@"=== PetDFY build.075 bootstrap pid=%d ===", getpid());
+         if (!PDBootGuardAllow()) {
+             return;
+         }
+--- a/src/Core/PDOverlayController.m
++++ b/src/Core/PDOverlayController.m
+@@ -246,7 +246,7 @@
+         if ([pet respondsToSelector:@selector(setOwner:)]) [pet performSelector:@selector(setOwner:) withObject:self];
+         if (_root) [_root.view addSubview:pet];
+ 
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         pet.frameHandler = ^{
+             PDOverlayController *strong = weakSelf;
+             if (strong) [strong advanceKeyboardAnimation:@(NO)];
+@@ -346,19 +346,19 @@
+     // 2) 建资源管理器
+     if (!_assets) {
+         _assets = [PDAssetManager new];
+-        PDDiag(@"start build.074 stage: assets readyHandler");
++        PDDiag(@"start build.075 stage: assets readyHandler");
+         // build.070：readyHandler 不捕获任何对象。069 在这里复制 weakSelf block 时，
+         // libsystem_blocks 的 _call_custom_copy_helper 直接 SIGBUS，SpringBoard 进安全模式。
+         _assets.readyHandler = ^(BOOL active, NSDictionary *state) {
+             (void)state;
+             if (!active) [[PDOverlayController sharedController] updateVisibility];
+         };
+-        PDDiag(@"start build.074 stage: assets readyHandler OK");
++        PDDiag(@"start build.075 stage: assets readyHandler OK");
+     }
+ 
+     // 3) 建窗口
+     if (![self ensureWindow]) {
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(), ^{
+             [weakSelf start];
+@@ -369,7 +369,7 @@
+     // 4) 监听器
+     if (!_orientationMonitor) {
+         _orientationMonitor = [PDActiveInterfaceOrientationMonitor new];
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         void (^oriHandler)(UIInterfaceOrientation, double) = ^(UIInterfaceOrientation o, double d) {
+             [weakSelf rotateHostWindowWithDuration:d];
+         };
+@@ -384,7 +384,7 @@
+ 
+     // 5) 定时器：每秒检查可见性与布局
+     if (!_monitor) {
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         _monitor = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+             PDOverlayController *s = weakSelf;
+             if (!s) { [t invalidate]; return; }
+@@ -438,7 +438,7 @@
+     [ai reloadPreferences];
+     [self setAi:ai];
+ 
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     [ai setDevicePreparationHandler:^(id result) {
+         PDOverlayController *strong = weakSelf;
+         if (strong) [strong systemAppearanceDidChange];
+@@ -1096,7 +1096,7 @@
+         return;
+     }
+ 
+-    __weak PDOverlayController *weakSelf = self;        // 0x854c objc_initWeak(sp-0x80)，10 个块各自 copyWeak
++    PDOverlayController *weakSelf = self;        // 0x854c objc_initWeak(sp-0x80)，10 个块各自 copyWeak
+ 
+     // 0x8554 bl bubbleAnchorInSuperview → 0x8588 initWithAnchorPoint:completion:
+     // 块体 0x8c08：摘掉键盘焦点、卸掉气泡回调、把聊天视图从父控制器与父视图上摘干净。
+@@ -1473,7 +1473,7 @@
+         if (self.hoverDismissBlock) {                                    // 0xa22c-0xa23c 先探空
+             dispatch_block_cancel(self.hoverDismissBlock);                // 0xa244-0xa254
+         }
+-        __weak typeof(self) weakSelf = self;                             // 0xa258-0xa260 objc_initWeak
++        typeof(self) weakSelf = self;                             // 0xa258-0xa260 objc_initWeak
+         dispatch_block_t block = dispatch_block_create(0, ^{             // 0xa2b8-0xa2c0 flags=0；块体 @0xa3cc
+             [weakSelf setHoverDismissBlock:nil];                         // 0xa3ec-0xa3fc
+             [weakSelf hideHoverButtons];                                 // 0xa400-0xa408
+@@ -1529,7 +1529,7 @@
+     }
+     [self setHoverButtons:buttons];                                      // 0xa15c-0xa164
+     [self setHoverActions:actions];                                      // 0xa168-0xa170
+-    __weak typeof(self) weakSelf = self;                                 // 0xa174-0xa17c objc_initWeak
++    typeof(self) weakSelf = self;                                 // 0xa174-0xa17c objc_initWeak
+     self.pet.hoverPositionHandler = ^(CGPoint point, CGSize reach) {      // 0xa1e8 setHoverPositionHandler:
+         [weakSelf layoutHoverButtonsAt:point reach:reach.width];          // 块体 @0xa41c-0xa458（d2 = size.width）
+     };
+--- a/src/Core/PDPetView.m
++++ b/src/Core/PDPetView.m
+@@ -166,7 +166,7 @@
+     }
+ 
+     // 帧回调
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     if (mtk) {
+         mtk.delegate = (id<MTKViewDelegate>)self;
+     }
+--- a/src/Core/PDSoundPlayer.m
++++ b/src/Core/PDSoundPlayer.m
+@@ -404,8 +404,8 @@
+         if (!buffer) return;                      // 0x11870
+ 
+         [voice setBusy:YES];                      // 0x11874-0x1187c
+-        __weak PDSoundPlayer *weakSelf = self;    // 0x11884-0x11888
+-        __weak PDVoice *weakVoice = voice;        // 0x1188c-0x11894
++        PDSoundPlayer *weakSelf = self;    // 0x11884-0x11888
++        PDVoice *weakVoice = voice;        // 0x1188c-0x11894
+ 
+         [[voice node] scheduleBuffer:buffer completionHandler:^{   // 0x11898-0x11918
+             PDSoundPlayer *s = weakSelf;
+@@ -521,7 +521,7 @@
+ 
+         NSUInteger generation = self.speechGeneration;
+         AVAudioFile *speechFile = self.speechFile;
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+ 
+         [self.speechNode scheduleFile:speechFile
+                                atTime:nil
+--- a/src/Sources/PDChatController.m
++++ b/src/Sources/PDChatController.m
+@@ -683,7 +683,7 @@
+ 
+     // 有按钮时留 0.45s 让按钮先落位，再开播
+     NSTimeInterval wait = [actions count] ? 0.45 : 0.0;
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     [self delay:wait block:^{
+         typeof(self) s = weakSelf;
+         if (!s) return;
+@@ -769,7 +769,7 @@
+     BOOL rush = [[[self current] objectForKeyedSubscript:@"rush"] boolValue];
+     NSTimeInterval delay = base / (speed * (rush ? 6.0 : 1.0));
+ 
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     [self delay:delay block:^{
+         [weakSelf revealNext];
+     }];
+@@ -851,7 +851,7 @@
+         dictation = [PDCloudVoiceInput new];
+         [self setDictation:dictation];
+     }
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     if ([dictation isKindOfClass:[PDCloudVoiceInput class]]) {
+         NSInteger request = [self dictationRequest];
+         [dictation setTextHandler:^(NSString *t) {
+@@ -1176,7 +1176,7 @@
+     [[(PDComposerTextView *)[self composer] placeholder] setHidden:NO];
+     [self setThinking:NO];
+     [[self view] setNeedsLayout];
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     dispatch_async(dispatch_get_main_queue(), ^{
+         [weakSelf.composer becomeFirstResponder];
+     });
+@@ -1222,7 +1222,7 @@
+     if (delay < 0.0) {
+         delay = 0.0;
+     }
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     unsigned long long request = [self dictationRequest];
+     NSTimer *timer = [NSTimer timerWithTimeInterval:delay
+                                             repeats:NO
+@@ -1507,7 +1507,7 @@
+         if ([self busy]) return;
+ 
+         // 静默 1.0s 后仍无活可干且输入气泡收着 → 自动关面板
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0
+                                                 repeats:NO
+                                                   block:^(NSTimer *t) {
+@@ -1527,7 +1527,7 @@
+     BOOL (^busy)(void) = [self bodyBusyProvider];
+     if (busy && busy()) {
+         // 身体动作未播完，0.1s 后重试
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         [self delay:0.1 block:^{ [weakSelf advanceQueue]; }];
+         return;
+     }
+@@ -1957,7 +1957,7 @@
+         return;
+     }
+ 
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     [self delay:0.001 block:^{
+         [weakSelf revealNext];
+     }];
+@@ -2086,7 +2086,7 @@
+     BOOL resume = [[current objectForKeyedSubscript:@"resumeComposer"] boolValue];
+     (void)resume;
+ 
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     NSTimer *timer = [NSTimer timerWithTimeInterval:delay
+                                             repeats:NO
+                                               block:^(NSTimer *fired) {
+@@ -2157,7 +2157,7 @@
+     BOOL doubao = [mode isEqual:@"doubao"];
+ 
+     if (![self speech]) {
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         PDReplySpeech *speech = [[PDReplySpeech alloc]
+             initWithPlay:^(NSString *segment, void (^done)(NSError *error)) {
+                 (void)segment;
+--- a/src/Sources/PDCloudVoiceInput.m
++++ b/src/Sources/PDCloudVoiceInput.m
+@@ -221,7 +221,7 @@
+ 
+         _service = [[PDVoiceServiceConnection alloc] initWithQueue:_workQueue];
+ 
+-        __weak PDCloudVoiceInput *weakSelf = self;
++        PDCloudVoiceInput *weakSelf = self;
+         void (^onEvent)(id, NSError *) = ^(id event, NSError *error) {
+             PDCloudVoiceInput *strongSelf = weakSelf;
+             if (!strongSelf) {
+@@ -329,7 +329,7 @@
+     format.mBytesPerPacket = 2;
+     format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+ 
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     AudioQueueRef queue = NULL;
+     OSStatus status = AudioQueueNewInputWithDispatchQueue(&queue, &format, 0,
+                                                           _workQueue ?: dispatch_get_main_queue(),
+@@ -486,7 +486,7 @@
+     [self stopCapture];
+ 
+     uint64_t generation = _runEpoch;
+-    __weak PDCloudVoiceInput *weakSelf = self;
++    PDCloudVoiceInput *weakSelf = self;
+ 
+     dispatch_async(_workQueue, ^{
+         PDCloudVoiceInput *target = weakSelf;
+--- a/src/Sources/PDReplySpeech.m
++++ b/src/Sources/PDReplySpeech.m
+@@ -94,7 +94,7 @@
+     }
+ 
+     NSUInteger token = [self generation];
+-    __weak PDReplySpeech *weakSelf = self;
++    PDReplySpeech *weakSelf = self;
+ 
+     [self setClient:[[PDDoubaoTTS alloc] initWithConfiguration:[self sessionConfiguration]]];
+ 
+--- a/src/Sources/PDVoiceServiceConnection.m
++++ b/src/Sources/PDVoiceServiceConnection.m
+@@ -437,7 +437,7 @@
+         return;
+     }
+ 
+-    __weak PDVoiceServiceConnection *weakSelf = self;
++    PDVoiceServiceConnection *weakSelf = self;
+     dispatch_data_t data = dispatch_data_create(frame.bytes, length, self.queue, ^{
+         // destructor：二进制里是空块
+     });
+--- a/src/Sources/PDChatService.m
++++ b/src/Sources/PDChatService.m
+@@ -457,7 +457,7 @@
+     }
+ 
+     // 分发
+-    __weak typeof(self) weakSelf = self;
++    typeof(self) weakSelf = self;
+     void (^done)(id, NSError *) = ^(id result, NSError *err) {
+         PDChatService *s = weakSelf;
+         if (!s) return;
+--- a/src/Sources/PDNative_IOSMCPHIDManager.m
++++ b/src/Sources/PDNative_IOSMCPHIDManager.m
+@@ -144,7 +144,7 @@
+         }
+ 
+         // 屏幕度量必须在主线程取；非主线程时同步切过去
+-        __weak typeof(self) weakSelf = self;
++        typeof(self) weakSelf = self;
+         void (^refreshMetrics)(void) = ^{
+             __strong typeof(weakSelf) self_ = weakSelf;
+             if (!self_) return;
+--- a/src/Sources/PDNative_AccessibilityManager.m
++++ b/src/Sources/PDNative_AccessibilityManager.m
+@@ -56,7 +56,7 @@
+     _contextResolver = [PDNative_MCPAXRemoteContextResolver new];
+     _uiElementSerializer = [PDNative_MCPUIElementSerializer new];
+ 
+-    __weak PDNative_AccessibilityManager *weakSelf = self;
++    PDNative_AccessibilityManager *weakSelf = self;
+     _uiElementsFacade = [[PDNative_MCPUIElementsFacade alloc]
+                          initWithContextResolver:_contextResolver
+                                       serializer:_uiElementSerializer
+--- a/layout/DEBIAN/control
++++ b/layout/DEBIAN/control
+@@ -1,6 +1,6 @@
+ Package: com.ojbkclub.petdfy
+ Name: 大肥鱼〇V〇
+-Version: 0.1.8-e2+build.074
++Version: 0.1.8-e2+build.075
+ Architecture: iphoneos-arm64e
+ Description: 大肥鱼〇V〇 桌面宠物 — 可编辑源码重建版（T3 基线）。包含 15 套服装素材、发色引擎、布局外置与两个辅助 dylib。
+ Maintainer: hf805864818

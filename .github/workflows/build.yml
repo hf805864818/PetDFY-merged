@@ -1,0 +1,120 @@
+name: build-deb
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'MEMORY/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build deb (ubuntu + theos + clang/lld)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make git curl ca-certificates xz-utils unzip \
+            libssl-dev libplist-dev libc6-dev binutils \
+            dpkg-dev fakeroot python3 file || true
+          # clang 与 ld64.lld 必须同版本，否则 arm64e 的 ptrauth 重定位
+          # 会报 "INVALID relocation has width 8 bytes"
+          for v in 18 19 20 21; do
+            if sudo apt-get install -y --no-install-recommends \
+                 clang-$v lld-$v llvm-$v 2>/dev/null; then
+              if [ -x "/usr/bin/clang-$v" ] && [ -x "/usr/bin/ld64.lld-$v" ]; then
+                echo "MATCHED_LLVM=$v" >> "$GITHUB_ENV"
+                break
+              fi
+            fi
+          done
+          which clang ld64.lld dpkg-deb ar tar || true
+
+      - name: Pin matched clang + ld64.lld
+        run: |
+          set -euo pipefail
+          V="${MATCHED_LLVM:-}"
+          if [ -n "$V" ] && [ -x "/usr/bin/clang-$V" ] && [ -x "/usr/bin/ld64.lld-$V" ]; then
+            sudo ln -sf "/usr/bin/clang-$V"      /usr/local/bin/clang
+            sudo ln -sf "/usr/bin/clang++-$V"    /usr/local/bin/clang++ 2>/dev/null || true
+            sudo ln -sf "/usr/bin/ld64.lld-$V"   /usr/local/bin/ld64.lld
+            sudo ln -sf "/usr/bin/llvm-lipo-$V"  /usr/local/bin/llvm-lipo 2>/dev/null || true
+            echo "== pinned LLVM $V =="
+          else
+            echo "!! 没有同版本 clang/lld，回退系统默认"
+          fi
+          clang --version | head -2
+          ld64.lld --version 2>&1 | head -2 || true
+
+      - name: Install ldid
+        run: |
+          set -euo pipefail
+          URL=https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
+          sudo curl -fsSL "$URL" -o /usr/local/bin/ldid
+          sudo chmod +x /usr/local/bin/ldid
+          ldid -h 2>&1 | head -3 || true
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          export THEOS="$HOME/theos"
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          # vendor 缺的 makefile 子模块兜底
+          [ -d "$THEOS/makefiles" ] || git clone --depth 1 https://github.com/theos/makefiles.git "$THEOS/makefiles"
+
+      - name: Fetch iOS SDK
+        run: |
+          set -euo pipefail
+          export THEOS="$HOME/theos"
+          git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+          mkdir -p "$THEOS/sdks"
+          cp -R "$(ls -d /tmp/sdks/iPhoneOS16*.sdk | tail -1)" "$THEOS/sdks/"
+          ls -1 "$THEOS/sdks"
+
+      - name: Build PetDFYPrefs from source (optional)
+        continue-on-error: true
+        run: |
+          bash tools/build-prefs.sh 2>&1 | tee prefs.log || echo "prefs 源码编译失败，将回退 vendor 二进制"
+
+      - name: Build layout
+        run: |
+          set -o pipefail
+          bash tools/build-layout.sh 2>&1 | tee layout.log
+
+      - name: Build dylibs + package
+        run: |
+          set -o pipefail
+          export THEOS="$HOME/theos"
+          export PATH="$THEOS/bin:$PATH"
+          make clean 2>&1 | tail -5 || true
+          make package FINALPACKAGE=1 DEBUG=0 2>&1 | tee build.log
+
+      - name: Verify deb
+        run: bash tools/verify-deb.sh
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: PetDFY-deb
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build.log
+            layout.log
+          if-no-files-found: ignore
