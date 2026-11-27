@@ -18,9 +18,9 @@
 #import "PDChatServiceInternals.h"
 
 // ── 外部 C 辅助（定义在 PDAIHelpers.m）──
-extern id PDAIPreference(id key, id fallback);
-extern NSString *PDAIString(id value);
-extern double PDAINumber(id value, double fallback);
+extern id PDAIPreference(NSString *key, id fallback);
+extern NSString *PDAIString(id _Nullable value);
+extern double PDAINumber(id _Nullable value, double fallback);
 
 // 31 个 ivar，布局与二进制一致（总长 0xf0）  // D7 ivar_list@0x54b08 count=31
 @interface PDChatService () {
