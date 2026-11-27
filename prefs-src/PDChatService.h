@@ -5,6 +5,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+@class PDAIMemory;
+
 @interface PDChatService : NSObject
 
 + (void) requestDataMaintenance:(id)a1 path:(id)a2 completion:(id)a3;
