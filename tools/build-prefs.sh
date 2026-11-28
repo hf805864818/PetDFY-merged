@@ -32,7 +32,7 @@ fi
 [ -n "$SDKROOT" ] && [ -d "$SDKROOT" ] || { echo "找不到 iOS SDK（设置 SDKROOT 或 THEOS）" >&2; exit 2; }
 
 CC="${CC:-clang}"
-ARCH="${ARCH:-arm64}"
+ARCH="${ARCH:-arm64e}"
 TRIPLE="${TRIPLE:-${ARCH}-apple-ios16.0}"
 OUT="build/prefs"
 mkdir -p "$OUT"
