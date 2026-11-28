@@ -142,13 +142,19 @@ static NSArray *kWNModesWalkStorage(void) {
 // ── 词 → 音效名 ───────────────────────────────────────────────────────────
 // 对象 @0x1084a8（count=5，keys @0x105918，values @0x105940）
 // 引用点：[0x4286c] objectForKeyedSubscript:，命中即 sound:kind:@"move" arguments:@[]
-static NSDictionary *const kWNWordSounds = @{
+static NSDictionary *kWNWordSoundsStorage(void) {
+    static NSDictionary *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = @{
     @"bow":    @"tick",     // key slot 0x105918 → CF 0xf99c8 | val slot 0x105940 → CF 0xf3ec8
     @"nod":    @"nod",      // key slot 0x105920 → CF 0xf3da8 | val slot 0x105948 → CF 0xf3da8
     @"shake":  @"shake",    // key slot 0x105928 → CF 0xf3c68 | val slot 0x105950 → CF 0xf3c68
     @"shiver": @"shiver",   // key slot 0x105930 → CF 0xf3d68 | val slot 0x105958 → CF 0xf3d68
     @"spin":   @"spin",     // key slot 0x105938 → CF 0xf3dc8 | val slot 0x105960 → CF 0xf3dc8
-};
+}; });
+    return a;
+}
+#define kWNWordSounds kWNWordSoundsStorage()
 
 // ── 空数组单例 ────────────────────────────────────────────────────────────
 // 所有 sound:kind:arguments: 的 arguments 实参都是同一 GOT 槽：
@@ -227,7 +233,7 @@ static NSDictionary *const kWNWordSounds = @{
         // 注释：左半区走 0.55~0.90，右半区走 0.10~0.45（两段都是 0.35 宽，不相交）
 
         double gy;
-        if (self->_freeGround) {                                  // [0x42410] ldrb [x20,#0x242]
+        if (self->freeGround) {                                  // [0x42410] ldrb [x20,#0x242]
             gy = [self rnd:[self minY] to:self.floorY];         // [0x42418..0x42428] floorY +0x1e8
         } else {
             gy = p.gy;                                          // [0x42434] ldr d8,[x20,#0x18]
