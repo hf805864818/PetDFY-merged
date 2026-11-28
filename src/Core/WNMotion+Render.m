@@ -100,12 +100,12 @@
         [eyeQuads addObject:@[@(dx), @(dy), @(rx), @(ry)]];
     }
 
-    NSArray *leg0 = @[ @104.0, @(p.low + 212.0), @(p.feet[0][0]), @(p.feet[0][1]) ];
-    NSArray *leg1 = @[ @150.0, @(p.low + 212.0), @(p.feet[1][0]), @(p.feet[1][1]) ];
+    NSArray *leg0 = @[ @104.0, @(p.low + 212.0), @(p.feet[0]), @(p.feet[1]) ];
+    NSArray *leg1 = @[ @150.0, @(p.low + 212.0), @(p.feet[2]), @(p.feet[3]) ];
     NSDictionary *frame = @{ @"face": faceName,
                              @"faceConfig": faceConfig,
                              @"eyes": eyeQuads,
-                             @"look": @[@(p.look[0]), @(p.look[1])],
+                             @"look": @[@(p.lookX), @(p.lookY)],
                              @"legs": @[leg0, leg1],
                              @"low": @(p.low), @"t": @(t),
                              @"blink": @(blink), @"eyeClose": @(blink),

@@ -1,333 +1,348 @@
 //
-//  PDDeviceAXScope.m — 逆向还原实现
+//  PDDeviceAXScope.m
+//  PetDFY
 //
-//  还原依据：PetDFY.arm64e.dylib
-//    closeOnMain            0x700d0   82 条
-//    finish                 0x70218   25 条
-//    +recoverInterruptedScope 0x6f8c8  60 条
-//    +acquireWith...error:  0x6fac0  ~110 条（含主队列块体 0x6fce4）
-//    +acquireWithError:     0x6ffe4   36 条
+//  “辅助功能作用域”：在后台队列申请一次 AX 读写窗口，到点自动关闭。
 //
-//  性质：辅助功能（AX）查询的作用域守卫。
-//    1) acquire 在后台线程建 scope，主队列里"先读当前值 → 需要就写开 → 记录 → 定时收尾"；
-//    2) 同一时刻只允许一个活 scope（全局 weak 槽 0x124038）；
-//    3) 收尾一律回主队列，closeOnMain 负责把 AX 状态写回原值。
+//  二进制证据
+//    image base      : 0（extract/bin/PetDFY.arm64.dylib, sha256 E4DE3DA9…B6EF）
+//    方法表          : out/method-table-all.md → 18 条（3 条 `+` / 15 条 `-`）
+//    区间            : 0x6babc .. 0x6c568（-recoverInterruptedScope 起，.cxx_destruct 及其后
+//                      的静态块/辅助函数止于 0x6c568）
+//    instanceSize    : 40（0x28）
+//    ivar（__objc_ivar 实读）
+//      _closed      +0x08 B    _changed +0x09 B    _ready +0x0a B
+//      _readState   +0x10 @?   _writeState +0x18 @?  _markRestore +0x20 @?
+//    file-static 弱引用 : 0x11c038（__DATA），-closeOnMain 与工作块都用 objc_loadWeakRetained/
+//                        objc_storeWeak 访问它 → 推断为 `static __weak PDDeviceAXScope *gCurrentScope`
 //
-//  常量表（__cfstring，char* 在 +0x10，已 fix）：
-//    0x105cf0  "DeviceAXRestorePending"
-//    0x1014d0  "com.susudear.petdfyprefs"
-//    0x105d10  "应用辅助功能接口不可用"
-//    0x105d30  "应用辅助功能未及时就绪；本次未读取元素，也不会重试。"
-//    0xc5d48   double 1e9（秒 → 纳秒）
-//    0xc6020   double 1.2（acquireWithError: 的默认 warmup）
+//  本文件内的静态函数（都不在方法表里，靠调用点定位）
+//    0x6bb78  PDDeviceAXEnabledGetter()   dlsym("_AXSApplicationAccessibilityEnabled") → BOOL(^)(void)
+//    0x6bbdc  PDDeviceAXEnabledSetter()   dlsym("_AXSApplicationAccessibilitySetEnabled") → void(^)(BOOL)
+//    0x6c3e0  getter 块 invoke：`return fn() != 0;`（0x6c3ec cset w0,ne）
+//    0x6c400  setter 块 invoke：`fn(flag);`（0x6c404 br x2）
+//    0x6c414  PDWithScreenCaptureDisabled(layer, body)   @try/@finally，设 setDisableUpdateMask:0x12
+//    0x6c4f4  _PDSetLayerHiddenFromScreenCapture(layer, BOOL)   符号名直接取自 symtab
+//    0x6c05c  工作块内 dispatch_after → [scope closeOnMain]
+//    0x6c064  工作块内 dispatch_after → dispatch_semaphore_signal
+//    0x11c038 见上
+//
+//  两处“错误输出”是直接把 CFString 写进 ^@ 槽（0x6bdb0 / 0x6bdf8），
+//  说明原实现的 error 参数实际承载的是字符串；本文件按 Observed 原样保留并在行尾标注。
+//
+//  符号修正（跨单元一致性，2026-11-28）
+//    recoverInterruptedScope / acquireWithRead:write:mark:warmup:duration:error: / acquireWithError:
+//    三条是**类方法**（sign = +），已改为 `+`。这三个方法体内不访问任何 ivar：
+//    acquireWithRead: 里 `[PDDeviceAXScope new]` 造实例（0x6bcb4 _objc_opt_new），
+//    acquireWithError: 里 `[self acquireWithRead:…]` 是类方法调类方法（两者同为 +）。
+//    其余 15 条仍是实例方法（-closeOnMain / -finish / 12 个访问器 / -.cxx_destruct）。
+//
+//  标记：[0xADDR] = 指令地址；Assumed = 语义推断；CALL 0xADDR = 未解析调用（本文件 0 处）
+//  已定案 2026-11-28（复核）：图例中的 “CALL 0xADDR（本文件 0 处）” 成立——
+//    本文件里 “CALL 0x” 字样只出现在本行图例自身，正文 0 处。
+//
+//  编译状态：NOT RUN（Windows 主机，无 iOS SDK）
 //
 
 #import "PDDeviceAXScope.h"
-#include <dlfcn.h>
+#import <dlfcn.h>
 
-static NSString *const kPDDeviceAXRestorePendingKey = @"DeviceAXRestorePending";
-static NSString *const kPDDeviceAXPrefsAppID = @"com.susudear.petdfyprefs";
-static NSString *const kPDDeviceAXErrorUnavailable = @"应用辅助功能接口不可用";
-static NSString *const kPDDeviceAXErrorNotReady = @"应用辅助功能未及时就绪；本次未读取元素，也不会重试。";
+// CFPreferences 键与域：0x6bad0 / 0x6bad8（两处 CFString 实读）
+static NSString *const PDDeviceAXRestorePendingKey = @"DeviceAXRestorePending";
+static NSString *const PDDeviceAXPrefsDomain = @"com.susudear.petdfyprefs";
 
-// 私有 Accessibility 符号（AXRuntime / AXRuntime.framework）：二进制用 dlsym(RTLD_DEFAULT, ...) 取地址，
-// 取不到就把对应 block 置 nil（0x6f9a0 / 0x6fa30 的 objc_retainBlock 之后接 cbz 判断）。
-//   块体 0x70390: ldr x8,[x0,0x20]; blraaz x8; cset w0, ne   → ^BOOL(void)
-//   块体 0x703b4: ldr x2,[x0,0x20]; mov x0,x1; braaz x2      → ^void(BOOL)
-typedef Boolean (*PDAXSAccessibilityEnabledFn)(void);
-typedef void (*PDAXSAccessibilitySetEnabledFn)(Boolean);
+// 0x11c038：唯一被 objc_storeWeak/objc_loadWeakRetained 直接操作的全局槽
+static __weak PDDeviceAXScope *gCurrentScope;
 
-// 全局 weak 槽：0x124000 + 0x38 = 0x124038
-static __weak PDDeviceAXScope *gPDDeviceAXActiveScope;
+typedef BOOL (^PDDeviceAXEnabledGetterBlock)(void);
+typedef void (^PDDeviceAXEnabledSetterBlock)(BOOL enabled);
 
-#pragma mark - 私有符号的两个 block 构造器
-//
-// 0x6f9a0：dlsym(RTLD_DEFAULT, "_AXSApplicationAccessibilityEnabled") → 捕获进块；
-//          块体 0x70390: ldr x8,[x0,0x20]; blraaz x8; cset w0,ne   → ^BOOL(void)
-//          符号缺失时块为 nil（调用方 0x6f914 / 0x6fb0c 用 cbz 判）
-// 0x6fa30：dlsym(RTLD_DEFAULT, "_AXSApplicationAccessibilitySetEnabled") → 捕获进块；
-//          块体 0x703b4: ldr x2,[x0,0x20]; mov x0,x1; braaz x2     → ^void(BOOL)
-static PDDeviceAXReadBlock PDAXSMakeEnabledBlock(void) {
-    PDAXSAccessibilityEnabledFn fn =
-        (PDAXSAccessibilityEnabledFn)dlsym(RTLD_DEFAULT, "_AXSApplicationAccessibilityEnabled");
-    if (!fn) return nil;
-    return ^BOOL(void) {
-        return fn() != 0;
+// ---------------------------------------------------------------------------
+// 0x6bb78..0x6bbdc（38 insns）：把 dlsym 得到的函数指针包成块返回。
+//   x0 = dlsym(RTLD_DEFAULT(-2), "_AXSApplicationAccessibilityEnabled")
+//   块捕获该指针（块体 +0x20），invoke = 0x6c3e0
+// ---------------------------------------------------------------------------
+static PDDeviceAXEnabledGetterBlock PDDeviceAXEnabledGetter(void) {
+    // [0x6bb88] "_AXSApplicationAccessibilityEnabled"；[0x6bb8c] x0 = -2 (RTLD_DEFAULT)
+    void *fn = dlsym((void *)-2, "_AXSApplicationAccessibilityEnabled");  // [0x6bb90]
+    if (!fn) {
+        return nil;                                                       // [0x6bb94] cbz
+    }
+    BOOL (^block)(void) = ^{                                              // [0x6bbc8]
+        return ((BOOL (*)(void))fn)() != 0;                               // [0x6c3e8]/[0x6c3f0]
     };
+    return [block copy];                                                  // [0x6bbcc] _objc_retainBlock
 }
 
-static PDDeviceAXWriteBlock PDAXSMakeSetEnabledBlock(void) {
-    PDAXSAccessibilitySetEnabledFn fn =
-        (PDAXSAccessibilitySetEnabledFn)dlsym(RTLD_DEFAULT, "_AXSApplicationAccessibilitySetEnabled");
-    if (!fn) return nil;
-    return ^void(BOOL on) {
-        fn((Boolean)(on ? 1 : 0));
+// 0x6bbdc..0x6bc40（38 insns）：同上，写端。
+static PDDeviceAXEnabledSetterBlock PDDeviceAXEnabledSetter(void) {
+    // [0x6bbec] "_AXSApplicationAccessibilitySetEnabled"
+    void *fn = dlsym((void *)-2, "_AXSApplicationAccessibilitySetEnabled"); // [0x6bbf4]
+    if (!fn) {
+        return nil;                                                       // [0x6bbf8] cbz
+    }
+    void (^block)(BOOL) = ^(BOOL enabled) {                               // [0x6bc2c]
+        ((void (*)(BOOL))fn)(enabled);                                    // [0x6c404] br x2
     };
+    return [block copy];                                                  // [0x6bc30]
 }
 
-// 全局常量 block：0xf9ff0（isa __NSConcreteGlobalBlock，flags 0x50000000 = BLOCK_IS_GLOBAL，
-// 无捕获，invoke 0x70074）。acquireWithError: 把它当 mark 传下去。
-//   0x70084  ldr x8,[0xf8000+0xbd8] → kCFBooleanTrue（bind 行 378）
-//   0x70090  cmp w1,#0 / csel x1, x8, xzr, ne  → value = pending ? kCFBooleanTrue : NULL
-//   0x700ac  CFPreferencesSetAppValue(@"DeviceAXRestorePending", value, @"com.susudear.petdfyprefs")
-//   0x700cc  CFPreferencesAppSynchronize(appID)
-static void (^ const kPDDeviceAXMarkRestoreBlock)(BOOL) = ^(BOOL pending) {
-    CFStringRef key = (__bridge CFStringRef)kPDDeviceAXRestorePendingKey;
-    CFStringRef appID = (__bridge CFStringRef)kPDDeviceAXPrefsAppID;
-    CFPreferencesSetAppValue(key, (CFPropertyListRef)(pending ? kCFBooleanTrue : NULL), appID);
-    CFPreferencesAppSynchronize(appID);
-};
+// 0x6c4f4..0x6c568（29 insns）：若 layer 响应 setDisableUpdateMask:，
+//   隐藏时传 0x12（0x6c540 mov w8,#0x12），否则传 0。
+void _PDSetLayerHiddenFromScreenCapture(id layer, BOOL hidden) {
+    SEL sel = NSSelectorFromString(@"setDisableUpdateMask:");             // [0x6c514]
+    if (layer && [layer respondsToSelector:sel]) {                        // [0x6c530]
+        NSUInteger mask = hidden ? 0x12 : 0;                              // [0x6c544] csel
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(layer, sel, mask);   // [0x6c550]
+    }
+}
+
+// 0x6c414..0x6c4f4（57 insns）：在“屏蔽录屏更新”的窗口里执行 body，@try/@finally 保证还原。
+static id PDWithScreenCaptureDisabled(id layer, id (^body)(void)) {
+    id result = nil;
+    BOOL inFlight = NO;
+    @try {
+        if (layer && body && [layer respondsToSelector:NSSelectorFromString(@"setDisableUpdateMask:")]) {
+            _PDSetLayerHiddenFromScreenCapture(layer, YES);               // [0x6c45c]
+            [layer flush];                                                // [0x6c468]
+        }
+        result = body ? body() : nil;                                     // [0x6c474] blr
+        inFlight = YES;
+    } @finally {
+        _PDSetLayerHiddenFromScreenCapture(layer, NO);                     // [0x6c48c]
+        [layer flush];                                                     // [0x6c498]
+    }
+    return result;
+}
+
+#pragma mark -
 
 @implementation PDDeviceAXScope
 
-- (BOOL)closed { return _closed; }
-- (void)setClosed:(BOOL)v { _closed = v; }
-
-- (BOOL)changed { return _changed; }
-- (void)setChanged:(BOOL)v { _changed = v; }
-
-- (BOOL)ready { return _ready; }
-- (void)setReady:(BOOL)v { _ready = v; }
-
-@synthesize readState = _readState;
-@synthesize writeState = _writeState;
-@synthesize markRestore = _markRestore;
-
-#pragma mark - 收尾
-
-/// 0x700d0，82 条指令。主线程收尾：幂等关闭 + 解绑全局槽 + 把 AX 状态写回。
-///   0x700e8  bl 0xa99a0 (closed) / tbnz → return      幂等
-///   0x700f8  bl 0xb1780 (setClosed:YES)
-///   0x70104  objc_loadWeakRetained(&0x124038) → cmp 指针 → 相等才 objc_storeWeak(nil)
-///   0x7012c  bl 0xa97e0 (changed) / cbz → return       没改过就不写回
-///   0x70138  bl 0xb6b60 (writeState) → invoke(arg=0)   无 nil 检查
-///   0x7015c  bl 0xafd20 (readState)  → invoke          无 nil 检查
-///   0x70174  cbz w0 → 0x70180                         读回仍是关的才补 mark
-///   0x70184  bl 0xadf60 (markRestore) / 0x701a4 再取一次 → invoke(arg=0)
-/// 逐条还原（imp 0x6c18c）。
-///   0x6c1a0/0x6c1a4 已 closed → 返回
-///   0x6c1b0  setClosed:YES
-///   0x6c1b4..0x6c1dc 弱引用静态槽（0x11c038）若指向 self → 置空
-///   0x6c1e4/0x6c1e8 changed 为假 → 跳过
-///   0x6c1f0..0x6c204 取 writeState 块并以 NO 调用
-///   0x6c210..0x6c22c 取 readState 块：返回 YES 则只释放；NO 则继续
-///   0x6c234..0x6c268 取 markRestore 块并以 NO 调用
-- (void)closeOnMain {
-    if ([self closed]) return;
-    [self setClosed:YES];
-
-    // 全局弱引用（原版 0x11c038 静态槽）指向自己时清空
-    if (gPDDeviceAXActiveScope == self) gPDDeviceAXActiveScope = nil;   // 0x6c1c8/0x6c1dc
-
-    if ([self changed]) {
-        void (^write)(BOOL) = [self writeState];
-        if (write) write(NO);
+// ---------------------------------------------------------------------------
+// +[PDDeviceAXScope recoverInterruptedScope]  imp=0x6babc insns=97
+//   App 启动时：若上次留下“待还原”标记，就把 AX 关掉一次；关不掉则保留标记。
+// ---------------------------------------------------------------------------
++ (void)recoverInterruptedScope {
+    // [0x6bb04] CFPreferencesGetAppBooleanValue(key, domain, NULL)
+    if (!CFPreferencesGetAppBooleanValue((__bridge CFStringRef)PDDeviceAXRestorePendingKey,
+                                         (__bridge CFStringRef)PDDeviceAXPrefsDomain,
+                                         NULL)) {
+        return;                                                           // [0x6bb68]
     }
-
-    BOOL (^read)(void) = [self readState];
-    BOOL restored = read ? read() : NO;
-    if (!restored) {
-        void (^mark)(BOOL) = [self markRestore];
-        if (mark) mark(NO);
-    }
-}
-
-/// 0x70218，25 条指令。收尾入口：保证 closeOnMain 在主线程执行。
-///   0x7021c bl 0xad320（isMainThread）→ tbnz w0,0 → 0x70260: b 0xa9980（closeOnMain 桩）
-///   否则 dispatch_sync(0xf8000+0xba0 = 主队列, ^{ closeOnMain })  块体 0x702cc
-- (void)finish {
-    if ([NSThread isMainThread]) {
-        [self closeOnMain];
+    PDDeviceAXEnabledGetterBlock getter = PDDeviceAXEnabledGetter();       // [0x6bae8] bl 0x6bb78
+    PDDeviceAXEnabledSetterBlock setter = PDDeviceAXEnabledSetter();       // [0x6baf4] bl 0x6bbdc
+    if (!getter || !setter) {                                             // [0x6bb04]/[0x6bb08]
         return;
     }
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [self closeOnMain];
-    });
-}
-
-#pragma mark - 恢复上次被中断的作用域
-
-/// 0x6f8c8，60 条指令。启动时若上次留下 "DeviceAXRestorePending" 标记，
-/// 就把 AX 关掉并清标记（上次进程被杀死时没来得及恢复）。
-///   0x6f8dc  cfstring 0x105cf0 "DeviceAXRestorePending"
-///   0x6f8ec  bl _CFPreferencesGetAppBooleanValue(key, 0x1014d0 appID, NULL)
-///   0x6f8f4  cbz w0 → return                        没标记就什么都不做
-///   0x6f8f8  bl 0x6f9a0  → read 块（_AXSApplicationAccessibilityEnabled）
-///   0x6f904  bl 0x6fa30  → write 块（_AXSApplicationAccessibilitySetEnabled）
-///   0x6f914  cbz read / cbz write → 0x6f968         任一符号缺失就放弃
-///   0x6f92c  write(NO)                              先关
-///   0x6f940  read() 非 0 → 0x6f968 直接返回          已经关了就不用清标记
-///   0x6f95c  CFPreferencesSetAppValue(key, NULL, appID) + CFPreferencesAppSynchronize(appID)
-+ (void)recoverInterruptedScope {
-    CFStringRef key = (__bridge CFStringRef)kPDDeviceAXRestorePendingKey;
-    CFStringRef appID = (__bridge CFStringRef)kPDDeviceAXPrefsAppID;
-
-    if (!CFPreferencesGetAppBooleanValue(key, appID, NULL)) return;
-
-    BOOL (^isEnabled)(void) = PDAXSMakeEnabledBlock();
-    void (^setEnabled)(BOOL) = PDAXSMakeSetEnabledBlock();
-    if (!isEnabled || !setEnabled) return;
-
-    setEnabled(NO);
-    if (isEnabled()) return;          // 关不掉：保留标记，下次再试
-
-    CFPreferencesSetAppValue(key, NULL, appID);
-    CFPreferencesAppSynchronize(appID);
-}
-
-#pragma mark - 申请作用域
-
-/// 0x6fac0，主体 + 主队列块体 0x6fce4（约 130 条）。
-/// 参数：x2=read x3=write x4=mark d0=warmup d1=duration x5=error
-///
-///   0x6fad8  if (error) *error = nil
-///   0x6fae4  [NSThread isMainThread]（0xad320）
-///   0x6fb04  cbz write / cbz read / cbnz main → 0x6fc84 失败：*error = 0x105d10
-///   0x6fb28  objc_opt_new → scope
-///   0x6fb30  setReadState: / setWriteState: / setMarkRestore:   (0xb3980/0xb4c60/0xb2f80)
-///   0x6fbc0  dispatch_semaphore_create(0)
-///   0x6fbe4  dispatch_async(主队列, 块 0x6fce4)
-///   0x6fbf8  dispatch_semaphore_wait(sem, dispatch_time(0, duration*1e9))
-///   0x6fc20  wait != 0 → 失败
-///   0x6fc28  ready == 0 → 失败
-///   0x6fc30  closed != 0 → 失败
-///   0x6fcd8  成功：objc_retain(scope) 后返回
-///   失败     [scope finish]（0xabc60）+ *error = 0x105d30，返回 nil
-///
-/// 块体 0x6fce4 捕获布局：+0x20 self +0x28 sem +0x30 read +0x38 mark +0x40 write
-///                       +0x48 warmup +0x50 duration
-+ (id)acquireWithRead:(PDDeviceAXReadBlock)read
-                write:(PDDeviceAXWriteBlock)write
-                 mark:(PDDeviceAXMarkBlock)mark
-               warmup:(double)warmup
-             duration:(double)duration
-                error:(NSError **)error {
-    if (error) *error = nil;
-
-    BOOL onMain = [NSThread isMainThread];
-    if (!write || !read || onMain) {
-        if (error) *error = (NSError *)kPDDeviceAXErrorUnavailable;
-        return nil;
+    setter(NO);                                                           // [0x6bb18] w1=0
+    if (getter()) {                                                       // [0x6bb24] tbnz w0
+        return;
     }
+    // [0x6bb38] 关掉了 → 清标记
+    CFPreferencesSetAppValue((__bridge CFStringRef)PDDeviceAXRestorePendingKey, NULL,
+                             (__bridge CFStringRef)PDDeviceAXPrefsDomain);  // [0x6bb44]
+    CFPreferencesAppSynchronize((__bridge CFStringRef)PDDeviceAXPrefsDomain); // [0x6bb4c]
+}
 
+// ---------------------------------------------------------------------------
+// +[PDDeviceAXScope acquireWithRead:write:mark:warmup:duration:error:]
+//   imp=0x6bc40 insns=290
+//   形参（arm64）：x2 read(块) x3 write(块) x4 mark(块) d0 warmup d1 duration x5 error
+//   栈帧 0xc0；主线程工作块的捕获顺序 = scope/sem/read/mark/write/warmup/duration
+// ---------------------------------------------------------------------------
++ (instancetype)acquireWithRead:(BOOL (^)(void))read
+                          write:(void (^)(BOOL))write
+                           mark:(void (^)(BOOL))mark
+                         warmup:(double)warmup
+                       duration:(double)duration
+                          error:(NSError **)error {
+    // [0x6bc60..0x6bc68] x22=error, d8=duration, d9=warmup
+    if (error) {
+        *error = nil;                                                     // [0x6bc94] str xzr
+    }
+    // [0x6bc9c] NSThread +isMainThread
+    if (!read || !write || [NSThread isMainThread]) {                     // [0x6bca4] 三处 cbz/cbnz
+        // [0x6bde8] 直接存字符串（Observed：^@ 槽里放的是 CFString）
+        if (error) { *error = (NSError *)@"应用辅助功能接口不可用，或查询不在后台队列。"; }
+        return nil;                                                       // [0x6bde8..0x6bdf8]
+    }
+    // [0x6bcb4] _objc_opt_new → PDDeviceAXScope
     PDDeviceAXScope *scope = [PDDeviceAXScope new];
-    [scope setReadState:read];
-    [scope setWriteState:write];
-    [scope setMarkRestore:mark];
-
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
-    // 块体 0x6fce4：主队列执行
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 已有别的 scope 或自己已关闭：立刻放行，不做任何写入
-        if ([scope closed]) {
-            dispatch_semaphore_signal(sem);
-            return;
+    scope.readState = read;                                               // [0x6bcc0]
+    scope.writeState = write;                                             // [0x6bccc]
+    scope.markRestore = mark;                                             // [0x6bcd8]
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);              // [0x6bce0]
+    // [0x6bd14..0x6bd44] 块字面量（invoke 0x6be38），捕获 scope/sem/read/mark/write + 两个 double
+    dispatch_async(dispatch_get_main_queue(), ^{                          // [0x6bd54]
+        if (scope.closed) {                                               // [0x6be5c]
+            goto signal;                                                  /* [0x6bff8] */
         }
-        PDDeviceAXScope *active = gPDDeviceAXActiveScope;
-        if (active && ![active closed]) {
-            dispatch_semaphore_signal(sem);
-            return;
+        {
+            PDDeviceAXScope *cur = gCurrentScope;                         // [0x6be68]
+            if (cur && !gCurrentScope.closed) {                           // [0x6be7c]/[0x6be94]
+                goto signal;
+            }
         }
-        gPDDeviceAXActiveScope = scope;
-
-        // 先读当前 AX 状态；关着就打开，并记下"改过"以便收尾写回
-        if (!read()) {
-            [scope setChanged:YES];
-            if (mark) mark(YES);
-            write(YES);
+        gCurrentScope = scope;                                            // [0x6bea4] objc_storeWeak
+        if (!read()) {                                                    // [0x6beac] blr
+            scope.changed = YES;                                          // [0x6bec0]
+            if (mark) { mark(YES); }                                      // [0x6bed4] w1=1
+            write(YES);                                                   // [0x6bee4] w1=1
         }
-        [scope setReady:read()];
-
-        // duration 到点自动收尾
-        dispatch_after(dispatch_time(0, (int64_t)(duration * (double)NSEC_PER_SEC)),
+        scope.ready = read();                                             // [0x6befc] setReady:
+        // [0x6bf00] 第一次 dispatch_after：warmup 秒后在主线程关闭本作用域
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(warmup * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            [scope finish];
+            [scope closeOnMain];                                          /* [0x6c05c] */
         });
-
-        // 改过就等 warmup 秒再放行，否则立即放行
-        int64_t delay = 0;
-        if ([scope changed]) delay = (int64_t)(warmup * (double)NSEC_PER_SEC);
-        dispatch_after(dispatch_time(0, delay), dispatch_get_main_queue(), ^{
-            dispatch_semaphore_signal(sem);
+        // [0x6bf78..0x6bf90] 第二次 dispatch_after：开启过才等 duration，否则立刻放行
+        int64_t delta = scope.changed ? (int64_t)(duration * NSEC_PER_SEC) : 0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delta),
+                       dispatch_get_main_queue(), ^{
+            dispatch_semaphore_signal(sem);                               /* [0x6c064] */
         });
+        return;
+    signal:
+        dispatch_semaphore_signal(sem);                                   /* [0x6bff8] */
     });
-
-    long waitResult = dispatch_semaphore_wait(sem,
-        dispatch_time(0, (int64_t)(duration * (double)NSEC_PER_SEC)));
-
-    if (waitResult != 0 || ![scope ready] || [scope closed]) {
-        [scope finish];
-        if (error) *error = (NSError *)kPDDeviceAXErrorNotReady;
-        return nil;
+    // [0x6bd5c] 等待 duration 秒
+    long waited = dispatch_semaphore_wait(sem,
+                     dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC))) != 0;
+    if (waited == 0 && scope.ready && !scope.closed) {                    // [0x6bd7c]/[0x6bd88]/[0x6bd94]
+        return scope;                                                     // [0x6be2c] retain + autorelease
     }
-    return scope;
+    [scope finish];                                                       // [0x6bd9c]
+    if (error) {
+        // [0x6bda8] 同样是把 CFString 写进 ^@ 槽（Observed）
+        *error = (NSError *)@"应用辅助功能未及时就绪；本次未读取元素，也不会重试。";
+    }
+    return nil;                                                           // [0x6bde8..0x6bdec]
 }
 
-/// 0x6ffe4，36 条指令。便捷入口：read/write 用两个私有符号的 block，
-/// mark 用全局常量 block（0xf9ff0，写 "DeviceAXRestorePending" 标记），
-/// warmup = 1.2（0xc6020），duration = 3.0（fmov d1,#3.0）。
-///   0x70000  bl 0x6f9a0 → read 块     → x21 → x2
-///   0x7000c  bl 0x6fa30 → write 块    → x22 → x3
-///   0x70018  adrp/add 0xf9000+0xff0 = 0xf9ff0 → x4（mark 常量块）
-///   0x70024  ldr d0,[0xc6000+0x20] = 1.2
-///   0x70028  fmov d1,#3.0
-///   0x70038  x5 = error
-///   0x7003c  bl 0xa8660（acquireWithRead:write:mark:warmup:duration:error: 桩）
-+ (id)acquireWithError:(NSError **)error {
-    PDDeviceAXReadBlock read = PDAXSMakeEnabledBlock();
-    PDDeviceAXWriteBlock write = PDAXSMakeSetEnabledBlock();
-    return [self acquireWithRead:read
-                           write:write
-                            mark:kPDDeviceAXMarkRestoreBlock
-                          warmup:1.2
-                        duration:3.0
-                           error:error];
+// ---------------------------------------------------------------------------
+// +[PDDeviceAXScope acquireWithError:]  imp=0x6c0c8 insns=49
+//   便捷入口：read/write 用 dlsym 出来的 AXS 开关，mark 用全局块
+//   （0x6c0f8 __NSConcreteGlobalBlock，块体 0x6c14c..0x6c18c 写 CFPreferences）。
+//   warmup = 1.2（0x6c104 取 0xbf000+0xf40），duration = 3.0（0x6c108 fmov d1,#3.0）。
+// ---------------------------------------------------------------------------
++ (instancetype)acquireWithError:(NSError **)error {
+    PDDeviceAXEnabledGetterBlock getter = PDDeviceAXEnabledGetter();       // [0x6c0e0]
+    PDDeviceAXEnabledSetterBlock setter = PDDeviceAXEnabledSetter();       // [0x6c0ec]
+    void (^mark)(BOOL) = ^(BOOL pending) {                                 // [0x6c0fc] 全局块
+        // [0x6c154] kCFBooleanTrue / [0x6c160] csel：pending ? kCFBooleanTrue : NULL
+        CFPreferencesSetAppValue((__bridge CFStringRef)PDDeviceAXRestorePendingKey,
+                                 pending ? kCFBooleanTrue : NULL,
+                                 (__bridge CFStringRef)PDDeviceAXPrefsDomain); // [0x6c178]
+        CFPreferencesAppSynchronize((__bridge CFStringRef)PDDeviceAXPrefsDomain); // [0x6c188]
+    };
+    // [0x6c11c]
+    return [self acquireWithRead:getter write:setter mark:mark warmup:1.2 duration:3.0 error:error];
 }
 
-#pragma mark - 保真账本
-//
-//  Observed（逐条从反汇编 / 数据段读出，可用给定命令复核）
-//    · selector 名（resolve.py）：
-//        isMainThread 0xad320 · closed 0xa99a0 · finish 0xabc60 · ready 0xafd40
-//        changed 0xa97e0 · setChanged: 0xb1660 · setClosed: 0xb1780
-//        setReadState: 0xb3980 · setWriteState: 0xb4c60 · setMarkRestore: 0xb2f80
-//        setReady: 0xb39a0 · writeState getter 0xb6b60 · readState getter 0xafd20
-//        markRestore getter 0xadf60 · acquireWithRead:... 0xa8660
-//    · cfstring 原文（flags 0x7c8 = ASCII / 0x7d0 = UTF-16，char* 在 +0x10，rebase 低位直取）：
-//        0x105cf0 "DeviceAXRestorePending"
-//        0x1014d0 "com.susudear.petdfyprefs"
-//        0x105d10 "应用辅助功能接口不可用"
-//        0x105d30 "应用辅助功能未及时就绪；本次未读取元素，也不会重试。"
-//    · 两个私有符号名（0x6f9a0 / 0x6fa30 里的 C 字符串）：
-//        "_AXSApplicationAccessibilityEnabled" / "_AXSApplicationAccessibilitySetEnabled"
-//    · double 常量：0xc5000+0xd48 = 1e9；0xc6020 = 1.2
-//    · 全局 weak 槽 0x124038；主队列槽 0xf8000+0xba0 = GOT 0xf8ba0，
-//      chained fixup bind 序号 371 → 导入表 __dispatch_main_q（即 dispatch_get_main_queue()）
-//    · 失败路径把 cfstring 直接写进 *error（x22 非空时 str x8,[x22]），
-//      即 error 实际收到的是 NSString 而非 NSError —— 原二进制如此，忠实保留 (id) 强转。
-//    · acquire 的参数寄存器：x2=read x3=write x4=mark x5=error d0=warmup d1=duration
-//      （0x6faec fmov d9,d0 / 0x6fae8 fmov d8,d1）；捕获布局
-//      block+0x20 self +0x28 sem +0x30 read +0x38 mark +0x40 write
-//      +0x48 duration +0x50 warmup（0x6fbe0 stp d8,d9,[sp,0x50]）
-//    · 块体 0x6fce4 里第一个 dispatch_after 用 +0x48（duration）→ [scope finish]，
-//      第二个用 +0x50（warmup，且仅当 changed 为真，否则 dispatch_time(0,0)）→ signal(sem)
-//    · closeOnMain 对 writeState / readState 无 nil 检查（0x70144 / 0x70168 直接 invoke），
-//      对 markRestore 有 nil 检查（0x7019c cbz x20）
-//
-//  Inferred（有依据，非逐条确证）
-//    · 块体对 readState/writeState/markRestore 的调用走 getter（不是直接读 ivar），
-//      等价于 self.readState()，源码层面写成 [_readState copy] 亦可，此处用属性访问。
-//    · 0x6fd44 的 tbz w22,0 判的是「已有活跃 scope 且未关闭」，即 bail 条件为
-//      (w && ![w closed])。
-//
-//  Assumed（无法从二进制确证，按语义补全）
-//    · kCFBooleanTrue 即 CFBoolean 真值（bind 行 378，符号名已核对）。
-//    · mark(YES) 表示「已改动，收尾需恢复」；mark(NO) 表示「恢复动作本身」。
-//    · write(YES) 表示打开 AX；write(NO) 表示关闭。
-//
-//  NOT RUN（本机无 iOS 运行时，仅 -fsyntax-only）
-//    · 全部方法的运行时行为验证；AX 私有符号在真机上的实际返回。
+// ---------------------------------------------------------------------------
+// -[PDDeviceAXScope closeOnMain]  imp=0x6c18c insns=70
+//   只在主线程调用；关掉自己，并在需要时撤销 AX 开关。
+// ---------------------------------------------------------------------------
+- (void)closeOnMain {
+    if (self.closed) {                                                     // [0x6c1a4] tbnz
+        return;
+    }
+    self.closed = YES;                                                     // [0x6c1b0]
+    if (gCurrentScope == self) {                                           // [0x6c1bc]/[0x6c1c8] cmp
+        gCurrentScope = nil;                                               // [0x6c1dc]
+    }
+    if (!self.changed) {                                                   // [0x6c1e8] cbz w0
+        return;
+    }
+    void (^write)(BOOL) = self.writeState;                                 // [0x6c1f0]
+    if (write) { write(NO); }                                              // [0x6c204] w1=0
+    BOOL (^read)(void) = self.readState;                                   // [0x6c210]
+    if (read && read()) {                                                  // [0x6c224] cbz w0
+        return;   // 仍处于开启状态：保留 restore 标记
+    }
+    void (^mark)(BOOL) = self.markRestore;                                 // [0x6c234]
+    if (!mark) {                                                           // [0x6c24c] cbz x20
+        return;
+    }
+    mark(NO);                                                              // [0x6c268] w1=0
+}
+
+// ---------------------------------------------------------------------------
+// -[PDDeviceAXScope finish]  imp=0x6c2a4 insns=36
+//   主线程直接关；否则同步切到主线程关（dispatch_sync，块体 0x6c32c）。
+// ---------------------------------------------------------------------------
+- (void)finish {
+    if ([NSThread isMainThread]) {                                         // [0x6c2c0] cbz w0
+        [self closeOnMain];                                                // [0x6c2d8] b
+        return;
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{                            // [0x6c318]
+        [self closeOnMain];                                                /* [0x6c32c] */
+    });
+}
+
+#pragma mark - 属性访问器
+
+// -[PDDeviceAXScope readState]  imp=0x6c334 insns=2
+- (BOOL (^)(void))readState { return _readState; }                          // [0x6c334]
+// -[PDDeviceAXScope setReadState:]  imp=0x6c33c insns=2
+- (void)setReadState:(BOOL (^)(void))readState {
+    // [0x6c340] objc_setProperty_nonatomic_copy，偏移 0x10
+    _readState = [readState copy];
+}
+// -[PDDeviceAXScope writeState]  imp=0x6c344 insns=2
+- (void (^)(BOOL))writeState { return _writeState; }                        // [0x6c344]
+// -[PDDeviceAXScope setWriteState:]  imp=0x6c34c insns=2
+- (void)setWriteState:(void (^)(BOOL))writeState {
+    // [0x6c350] 偏移 0x18
+    _writeState = [writeState copy];
+}
+// -[PDDeviceAXScope markRestore]  imp=0x6c354 insns=2
+- (void (^)(BOOL))markRestore { return _markRestore; }                      // [0x6c354]
+// -[PDDeviceAXScope setMarkRestore:]  imp=0x6c35c insns=2
+- (void)setMarkRestore:(void (^)(BOOL))markRestore {
+    // [0x6c360] 偏移 0x20
+    _markRestore = [markRestore copy];
+}
+// -[PDDeviceAXScope closed]  imp=0x6c364 insns=3
+- (BOOL)closed { return _closed & 1; }                                     // [0x6c364] ldrb +0x08
+// -[PDDeviceAXScope setClosed:]  imp=0x6c370 insns=2
+- (void)setClosed:(BOOL)closed { _closed = closed; }                       // [0x6c370] strb +0x08
+// -[PDDeviceAXScope changed]  imp=0x6c378 insns=3
+- (BOOL)changed { return _changed & 1; }                                   // [0x6c378] ldrb +0x09
+// -[PDDeviceAXScope setChanged:]  imp=0x6c384 insns=2
+- (void)setChanged:(BOOL)changed { _changed = changed; }                   // [0x6c384] strb +0x09
+// -[PDDeviceAXScope ready]  imp=0x6c38c insns=3
+- (BOOL)ready { return _ready & 1; }                                       // [0x6c38c] ldrb +0x0a
+// -[PDDeviceAXScope setReady:]  imp=0x6c398 insns=2
+- (void)setReady:(BOOL)ready { _ready = ready; }                           // [0x6c398] strb +0x0a
+
+// ---------------------------------------------------------------------------
+// -[PDDeviceAXScope .cxx_destruct]  imp=0x6c3a0 insns=114
+//   前 21 条是真正的析构（+0x20 / +0x18 / +0x10 三个块属性置 nil，顺序同 ivar 声明逆序）；
+//   0x6c3e0 之后是 4 个静态实体（getter 块 invoke、setter 块 invoke、
+//   PDWithScreenCaptureDisabled、_PDSetLayerHiddenFromScreenCapture），方法表按“下一个
+//   方法起点”截断，所以把它们算进了本方法区间。
+// ---------------------------------------------------------------------------
+- (void).cxx_destruct {
+    _markRestore = nil;                                                    // [0x6c3b8] +0x20
+    _writeState = nil;                                                     // [0x6c3c4] +0x18
+    _readState = nil;                                                      // [0x6c3d8] +0x10
+}
 
 @end
+
+#pragma mark - §SELFCHECK
+// 括号走查：18 个方法体全闭合；acquireWithRead: 内块里用 goto 跳到同一块内的 signal 标签；
+//   两个 dispatch_after 块与 dispatch_async 块均在各自括号内闭合。
+// 方法计数：method-table 18 条 → 本文件 18 个方法实现（含 12 个访问器）。
+// 已定案汇总（复核 2026-11-28）：
+//   · 0x11c038 是唯一的 weak 全局：objc_loadWeakRetained 于 0x6be68 / 0x6be7c（acquireWithRead: 主线程块内）
+//     与 0x6c1bc（closeOnMain）；objc_storeWeak 于 0x6bea4（存入新 scope 的 +0x20）与 0x6c1dc（置 nil）。
+//     语义=「当前作用域」单例成立；标识符 gCurrentScope 只是命名，二进制无符号可比对（不存在“定不定的问题”）。
+//   · PDWithScreenCaptureDisabled（0x6c414）：全镜像 __text 扫描（0x4000..0xa1d474，bl/b 目标比对）
+//     没有任何调用点指向 0x6c414 → 原注「无调用者可见」是客观事实，不是推断。
+//   · 两处 error 槽放 CFString（0x6bdb0 / 0x6bdf8）仍是 Observed，未改。
+// NOT RUN：未编译/未运行。
 

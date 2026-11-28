@@ -49,13 +49,13 @@
     if ([air isEqual:@"throw"]) {                   // [0x46af0]
         [self setExpression:@"surprised"];          // [0x46b04]  @"surprised"
         p.nextAt = self.time + 0.9;                 // [0x46b14]  0.9
-        p.emitAt = self.time + 2.0;                 // [0x46b24]  2.0
+        p.fxCool = self.time + 2.0;                 // [0x46b24]  2.0
     } else if ([air isEqual:@"drop"]) {             // [0x46b2c]  @"drop"
         [self setExpression:@"happy"];              // [0x46b40]  @"happy"
         p.nextAt = self.time + 1.6;                 // [0x46b50]  1.6
-        p.emitAt = self.time + 2.6;                 // [0x46b60]  2.6
+        p.fxCool = self.time + 2.6;                 // [0x46b60]  2.6
     } else {
-        p.emitAt = self.time + [self rnd:0.8 to:2.0]; // [0x46b74]  rnd:0.8 to:2.0
+        p.fxCool = self.time + [self rnd:0.8 to:2.0]; // [0x46b74]  rnd:0.8 to:2.0
     }
 }
 

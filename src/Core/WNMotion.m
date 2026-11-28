@@ -115,8 +115,8 @@ static double WNReadNum(NSDictionary *d, id key, double fallback) {
 /// 把当前按压点同步到指针状态
 - (void)syncDragPointer {
     if (!pressing) return;
-    p.target = p.x;
-    p.targetY = p.gy;
+    p.walkToX = p.x;
+    p.walkToY = p.gy;
 }
 
 - (void)pointerHover:(CGPoint)p {
@@ -272,9 +272,9 @@ static double WNReadNum(NSDictionary *d, id key, double fallback) {
 - (double)snoreSeconds { return _snoreSeconds; }
 - (void)setSnoreSeconds:(double)v { _snoreSeconds = v; }
 - (double)x { return p.x; }
-- (void)setX:(double)v { if (isfinite(v)) p.x = v; p.target = p.x; }
+- (void)setX:(double)v { if (isfinite(v)) p.x = v; p.walkToX = p.x; }
 - (double)gy { return p.gy; }
-- (void)setGy:(double)v { if (isfinite(v)) { p.gy = v; p.fy = v; p.targetY = v; } }
+- (void)setGy:(double)v { if (isfinite(v)) { p.gy = v; p.fy = v; p.walkToY = v; } }
 #pragma mark - 二进制存取器（逐条 8-16 指令，纯 ivar 读写）
 - (void)setGroupTilt:(double (^)(NSString *, double, double))v { _groupTilt = [v copy]; }
 
@@ -671,7 +671,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     if ([self is:@"sleep"] || [self is:@"sit"]) {
         BOOL wasSleep = [self is:@"sleep"];
         [self setModeTo:@"wake"];
-        p.startle = YES;
+        p.wokeNow = YES;
         p.sqv += -2.2;
         p.nextAt = self.time + 2.4;
         [self sound:@"surprised" kind:@"face" arguments:@[]];
@@ -689,8 +689,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
 
     if ([self random] < 0.5 && [self is:@"idle"]) {
         [self setModeTo:@"crouch"];
-        p.jumpV  = 126.0;
-        p.jumpVx = 0;
+        p.launchY  = 126.0;
+        p.launchX = 0;
     }
 
     [self event:@"touch" detail:@{ @"kind": @"poke" }];
@@ -808,8 +808,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     NSString *old = self.mode;
     [self setMode:newMode];
     p.modeT   = 0;
-    p.turned  = NO;
-    p.startle = NO;
+    p.flipOnce  = NO;
+    p.wokeNow = NO;
 
     if (![old isEqual:newMode]) {
         [self event:@"mode" detail:@{ @"mode": newMode }];
@@ -825,8 +825,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         p.snoreAt = self.time + 2.5;
     }
     if ([newMode isEqual:@"dizzy"]) {
-        p.sfxAt  = 0;
-        p.noteAt = 0;
+        p.voiceCool  = 0;
+        p.nextNoteAt = 0;
     }
 }
 #endif
@@ -858,35 +858,35 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         p.facing   = 1.0;
         p.faceVis  = 1.0;
 
-        p.gap[0] = 50.0;                    // +0xd8
-        p.gap[1] = 50.0;
+        p.gapX = 50.0;                    // +0xd8
+        p.gapY = 50.0;
 
-        p.modeT  = 0;  p.dur    = 0;  p.target  = 0;  p.targetY = 0;
-        p.speed  = 0;  p.stride = 0;  p.lift    = 0;  p.bob     = 0;
+        p.modeT  = 0;  p.dwell    = 0;  p.walkToX  = 0;  p.walkToY = 0;
+        p.speed  = 0;  p.bob = 0;  p.lift    = 0;  p.sway     = 0;
         p.phase  = 0;  p.lean   = 0;  p.tilt    = 0;  p.tiltV   = 0;
         p.sq     = 0;  p.sqv    = 0;  p.sitK    = 0;  p.stretch = 0;
         p.low    = 0;  p.drowse = 0;
 
-        p.feet[0][0] = 104.0;  p.feet[0][1] = 241.0;   // 0xc6330
-        p.feet[1][0] = 150.0;  p.feet[1][1] = 241.0;
+        p.feet[0] = 104.0;  p.feet[1] = 241.0;   // 0xc6330
+        p.feet[2] = 150.0;  p.feet[3] = 241.0;
 
         p.blinkT    = 1.5;                  // +0x118
         p.blinkAge  = 9.0;                  // +0x120
         p.exprUntil = 0.0;                  // +0x128
-        p.emitAt    = 1.2;                  // +0x130
+        p.fxCool    = 1.2;                  // +0x130
 
-        p.turnAcc = 9.0;  p.dx     = 0;     // +0x138/+0x140
-        p.dy      = 9.0;  p.jumpV  = 0;     // +0x148/+0x150
-        p.jumpVx  = 700.0; p.blushK = 0;    // +0x158/+0x160
-        p.swapAge = 0;    p.glance[0] = 9.0;   // +0x168/+0x170
+        p.stallT = 9.0;  p.dragX     = 0;     // +0x138/+0x140
+        p.dragY      = 9.0;  p.launchY  = 0;     // +0x148/+0x150
+        p.launchX  = 700.0; p.blushK = 0;    // +0x158/+0x160
+        p.eyeT = 0;    p.glanceX = 9.0;   // +0x168/+0x170
 
-        p.glance[1] = 9.0;  p.glanceAt = 0;  // +0x178/+0x180
+        p.glanceY = 9.0;  p.glanceAt = 0;  // +0x178/+0x180
         p.snoreAt   = 9.0;  p.swing    = 0;  // +0x188/+0x190
-        p.swingV    = 9.0;  p.prevA    = 0;  // +0x198/+0x1a0
+        p.swingV    = 9.0;  p.prevX    = 0;  // +0x198/+0x1a0
         p.velX      = 9.0;  p.talkK    = 0;  // +0x1a8/+0x1b0
-        p.sfxAt     = 9.0;  p.noteAt   = 0;  // +0x1b8/+0x1c0
+        p.voiceCool     = 9.0;  p.nextNoteAt   = 0;  // +0x1b8/+0x1c0
         // +0x1c5 有一处未对齐的 q0 写（9.0 高位 3 字节叠加到 noteAt 尾，实为清尾部 BOOL 区）
-        p.hasPrev = p.turned = p.startle = p.willSleep = p.skidded = NO;  // +0x1d0 尾 5 字节
+        p.hasPrev = p.flipOnce = p.wokeNow = p.sitSeen = p.skidded = NO;  // +0x1d0 尾 5 字节
 
         pointerX = -10000.0;                 // +0x210
         pointerY = -10000.0;                 // +0x218
@@ -925,7 +925,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
 
     if ([self is:@"sleep"] || [self is:@"sit"]) {
         [self setModeTo:@"wake"];
-        p.startle = YES;                           // +0x1d2
+        p.wokeNow = YES;                           // +0x1d2
     }
 
     [self setExpression:nil];
@@ -941,8 +941,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     }
 
     [self setModeTo:(run ? @"run" : @"walk")];
-    p.target  = tx;                                // +0x58
-    p.targetY = p.gy;                              // +0x60
+    p.walkToX  = tx;                                // +0x58
+    p.walkToY = p.gy;                              // +0x60
     [self setWalkIdentifier:ident];
     return YES;
 }
@@ -1023,7 +1023,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         [self setPulse:nil];
         [self setExpression:nil];
         [self setModeTo:@"play_ball"];
-        p.dur    = 6.5;                       // +0x50
+        p.dwell    = 6.5;                       // +0x50
         p.nextAt = self.time + 6.5 + 2.0;     // +0x130
         return YES;
     }
@@ -1040,13 +1040,13 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
 
         if (sleepy) {
             [self setModeTo:@"wake"];
-            p.startle = YES;
+            p.wokeNow = YES;
         }
         [self setExpression:nil];
         double minx = [self minX], maxx = [self maxX];
         tx = fmax(minx, fmin(maxx, tx));
-        p.target  = tx;                        // +0x58
-        p.targetY = ty;                        // +0x60
+        p.walkToX  = tx;                        // +0x58
+        p.walkToY = ty;                        // +0x60
         [self setModeTo:word];
         [self setWalkWord:word];
         return YES;
@@ -1069,9 +1069,9 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         }
         else if ([word isEqual:@"jump"] || [word isEqual:@"hop"] || [word isEqual:@"flap"]) {
             [self setModeTo:@"crouch"];
-            if ([word isEqual:@"jump"])      { p.jumpV = 720.0; p.jumpVx = p.facing * 40.0; }
-            else if ([word isEqual:@"hop"])  { p.jumpV = 540.0; p.jumpVx = 0; }
-            else                             { p.jumpV = 126.0; p.jumpVx = 0; }
+            if ([word isEqual:@"jump"])      { p.launchY = 720.0; p.launchX = p.facing * 40.0; }
+            else if ([word isEqual:@"hop"])  { p.launchY = 540.0; p.launchX = 0; }
+            else                             { p.launchY = 126.0; p.launchX = 0; }
             if ([word isEqual:@"flap"]) {
                 [self pulse:word duration:1.4];
                 [self holdFace:@"happy" seconds:1.6];
@@ -1080,8 +1080,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         }
         else if ([@[ @"look", @"dizzy", @"sit", @"sleep", @"dance" ] containsObject:word]) {
             [self setModeTo:word];
-            p.dur      = [word isEqual:@"dance"] ? 1e9 : 3.2;
-            p.willSleep = NO;                  // +0x1d3
+            p.dwell      = [word isEqual:@"dance"] ? 1e9 : 3.2;
+            p.sitSeen = NO;                  // +0x1d3
             if ([word isEqual:@"dance"]) {
                 [self holdFace:@"happy" seconds:3.4];
                 [self sound:@"dance" kind:@"move" arguments:@[]];
@@ -1137,12 +1137,12 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         @"sitK":     @(p.sitK),
         @"stretch":  @(p.stretch),
         @"low":      @(p.low),
-        @"look":     @[ @(p.look[0]), @(p.look[1]) ],
+        @"look":     @[ @(p.lookX), @(p.lookY) ],
         @"swing":    @(p.swing),
         @"swingV":   @(p.swingV),
         @"velX":     @(p.velX),
-        @"feet":     @[ @(p.feet[0][0]), @(p.feet[0][1]),
-                        @(p.feet[1][0]), @(p.feet[1][1]) ],
+        @"feet":     @[ @(p.feet[0]), @(p.feet[1]),
+                        @(p.feet[2]), @(p.feet[3]) ],
         @"blinkAge": @(p.blinkAge),
         @"blinkT":   @(p.blinkT),
         @"expr":     self.expression ?: [NSNull null],
@@ -1201,8 +1201,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         [self setLastAction:word];
     } else if ([word isEqual:@"sit"]) {
         [self setModeTo:word];
-        p.dur       = [self rnd:6.0 to:9.0];
-        p.willSleep = [self random] < 0.6;
+        p.dwell       = [self rnd:6.0 to:9.0];
+        p.sitSeen = [self random] < 0.6;
         [self setLastAction:word];
     } else if ([word isEqual:@"walk"] || [word isEqual:@"run"]) {
         [self setExpression:nil];
@@ -1215,8 +1215,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
             tx = (p.x < self->width * 0.5) ? [self maxX] - [self rnd:0.0 to:30.0]
                                            : [self minX] + [self rnd:0.0 to:30.0];
         }
-        p.target  = tx;
-        p.targetY = self->freeGround ? [self rnd:[self minY] to:self->floorY] : p.gy;
+        p.walkToX  = tx;
+        p.walkToY = self->freeGround ? [self rnd:[self minY] to:self->floorY] : p.gy;
     } else {   // jump / wait
         [self setLastAction:word];
         if (![word isEqual:@"wait"]) [self doWord:word];
@@ -1245,14 +1245,14 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     CGPoint g = [self toStage:CGPointMake(128.0, 36.0)];
     [self setExpression:nil];
     [self setModeTo:@"drag"];
-    p.dx    = g.x;
-    p.dy    = g.y;
+    p.dragX    = g.x;
+    p.dragY    = g.y;
     p.sqv   += -1.2;
     p.tiltV  = 0;
 
     if (self->_responsiveInteraction) {
         [self syncDragPointer];
-        p.prevA  = p.dx;
+        p.prevX  = p.dragX;
         p.velX   = self->pointerVX;
         p.hasPrev = YES;                        // +0x1d0
     }
@@ -1279,8 +1279,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     double hScale = (1.0 - sq) * (1.0 + st * 0.09);          // d12
     double d13    = 1.0 + blinkArg * 0.016;
 
-    double d11 = isDrag ? p.dx : p.x;
-    double d10 = isDrag ? p.dy : p.fy;
+    double d11 = isDrag ? p.dragX : p.x;
+    double d10 = isDrag ? p.dragY : p.fy;
     double lean    = p.lean;
     double faceVis = p.faceVis;
 
@@ -1334,7 +1334,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     NSArray *eyes = self.eyeCur;
     if (!eyes) eyes = face[@"eyes"];
     double eyeClose = 0.0;
-    double g = p.swapAge;
+    double g = p.eyeT;
     if (g < 0.07 && self.eyePrev) {
         eyes = self.eyePrev;
         eyeClose = g / 0.07;
@@ -1344,8 +1344,8 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
 
     NSMutableDictionary *faceConfig = [face mutableCopy];
     faceConfig[@"eyes"] = eyes;
-    faceConfig[@"gap"]  = @[ @(fmin(p.gap[0] + p.talkK * 12.0, 64.0)),
-                             @(fmin(p.gap[1] + p.talkK * 12.0, 64.0)) ];
+    faceConfig[@"gap"]  = @[ @(fmin(p.gapX + p.talkK * 12.0, 64.0)),
+                             @(fmin(p.gapY + p.talkK * 12.0, 64.0)) ];
     faceConfig[@"blush"] = @(p.blushK);
 
     id gesture = [NSNull null];
@@ -1354,12 +1354,12 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         gesture = @{ @"kind": self.pulse[@"kind"], @"k": @(k) };
     }
 
-    NSArray *leg0 = @[ @104.0, @(p.low + 212.0), @(p.feet[0][0]), @(p.feet[0][1]) ];
-    NSArray *leg1 = @[ @150.0, @(p.low + 212.0), @(p.feet[1][0]), @(p.feet[1][1]) ];
+    NSArray *leg0 = @[ @104.0, @(p.low + 212.0), @(p.feet[0]), @(p.feet[1]) ];
+    NSArray *leg1 = @[ @150.0, @(p.low + 212.0), @(p.feet[2]), @(p.feet[3]) ];
 
     NSDictionary *frame = @{
         @"faceConfig": faceConfig,
-        @"look":       @[ @(p.look[0]), @(p.look[1]) ],
+        @"look":       @[ @(p.lookX), @(p.lookY) ],
         @"legs":       @[ leg0, leg1 ],
         @"low":        @(p.low),
         @"t":          @(t),
@@ -1425,21 +1425,21 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
                 lookY = (py / dist) * 4.0 * k;               // 0x46dec–0x46df8
             } else if (self.time > p.glanceAt) {             // 0x46e00–0x46e0c
                 if ([self random] < 0.45) {                  // 0x46e10–0x46e20
-                    p.glance[0] = 0;
+                    p.glanceX = 0;
                 } else {
-                    p.glance[0] = [self rnd:-3.0 to:5.0];    // 0x46e38–0x46e48
+                    p.glanceX = [self rnd:-3.0 to:5.0];    // 0x46e38–0x46e48
                 }
-                p.glance[1] = [self rnd:-3.0 to:3.0];        // 0x46e4c–0x46e5c
+                p.glanceY = [self rnd:-3.0 to:3.0];        // 0x46e4c–0x46e5c
                 p.glanceAt = self.time + [self rnd:1.2 to:3.0];  // 0x46e60–0x46e7c
             }
         }
-        lookX = p.glance[0]; lookY = p.glance[1];            // 0x46e80 ldp [0x178]
+        lookX = p.glanceX; lookY = p.glanceY;            // 0x46e80 ldp [0x178]
     }
 
     // idle：roam 到期 → decideAutonomousAction（0x46e84–0x46f40）
     if ([mode isEqual:@"idle"]) {
         // 0x46ea8–0x46ed8：pointerInside && !pressing && facing 朝反且 dist<600 → 转身（跳 0x48944）
-        p.turnAcc = 0;                          // 0x46edc +0x140
+        p.stallT = 0;                          // 0x46edc +0x140
         // [待补 0x46ee4–0x46f40] walk 目标初始化 + decideAutonomousAction
     }
     else if ([mode isEqual:@"walk"] || [mode isEqual:@"run"]) {
@@ -1447,7 +1447,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         BOOL isRun = [mode isEqual:@"run"];
 
         double cx = p.x;                        // 0x8
-        double tx = p.target, ty = p.targetY;   // 0x58
+        double tx = p.walkToX, ty = p.walkToY;   // 0x58
         double cy = p.gy;                       // 0x18
         double dx = tx - cx;                    // d12
         double dy = ty - cy;                    // d11
@@ -1561,7 +1561,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
                          eyes[0][@"shape"], eyes[1][@"shape"]];   // 0x47600–0x47658
         if (![sig isEqual:self.eyeSig]) {                    // 0x47678–0x476a4
             if (self.eyeCur) [self setEyePrev:self.eyeCur];  // 0x476a8–0x476d8
-            p.swapAge = 0;                                   // 0x476e0 +0x170
+            p.eyeT = 0;                                   // 0x476e0 +0x170
             [self setEyeSig:sig];                            // 0x476ec
         }
         // 眼睛弹簧：把每个眼睛的 rx/ry/dx/dy 打包进 eyeDims[i]（fcn 0x49848）
@@ -1575,7 +1575,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
         }
 
         // 连续眼睛弹簧（0x47828–0x47a40，每帧）：ring/lid 形状按指数平滑插值 dims
-        p.swapAge += dt;                                     // 0x47834 +0x170
+        p.eyeT += dt;                                     // 0x47834 +0x170
         double spring = 1.0 - exp(-16.0 * dt);               // 0x47850–0x47864
         NSMutableArray *newEyes = [NSMutableArray new];      // 0x47844–0x4784c
         for (int i = 0; i < 2; i++) {                        // 0x47890–0x47a30（w28 控制的 2 趟循环）
@@ -1632,7 +1632,7 @@ static NSString * const kWNMotionFaceGapDefault = @"<0x10f608>";
     if ([mode isEqual:@"crouch"]) {                          // 0x48c94
         // 下蹲蓄力：modeT>0.16 时起跳
         if (p.modeT > 0.16) {                                // 0x48cd0
-            p.vx = p.jumpVx;  p.vy = -p.jumpV;               // 0x48cd8–0x48ce0
+            p.vx = p.launchX;  p.vy = -p.launchY;               // 0x48cd8–0x48ce0
             [self setAirKind:@"jump"];                       // 0x48cf4
             p.sqv += -2.6;                                   // 0x48cf8–0x48d08, 0xc61f0=-2.6
             [self sound:@"jump" kind:@"move" arguments:@[]]; // 0x48d24

@@ -33,16 +33,16 @@
     p.x = 320.0;
     p.fy = floorY;
     p.gy = floorY;
-    p.target = p.x;
-    p.targetY = p.gy;
+    p.walkToX = p.x;
+    p.walkToY = p.gy;
     p.facing = 1.0;
     p.faceVis = 1.0;
-    p.gap[0] = p.gap[1] = 50.0;
-    p.feet[0][0] = 104.0; p.feet[0][1] = 241.0;
-    p.feet[1][0] = 150.0; p.feet[1][1] = 241.0;
+    p.gapX = p.gapY = 50.0;
+    p.feet[0] = 104.0; p.feet[1] = 241.0;
+    p.feet[2] = 150.0; p.feet[3] = 241.0;
     p.blinkT = 2.0;
     p.blinkAge = 1.0;
-    p.swapAge = 1.0;
+    p.eyeT = 1.0;
     p.glanceAt = 0.0;
     pointerX = pointerY = -10000.0;
     _mode = @"idle";
@@ -173,8 +173,8 @@
     pointerInside = YES;
     pressing = YES;
     _responsiveInteraction = YES;
-    p.dx = p.x;
-    p.dy = p.fy;
+    p.dragX = p.x;
+    p.dragY = p.fy;
     // 按下先保持原姿态，移动超过阈值才抓取；否则普通单击也会被当成投掷。
     return YES;
 }
@@ -197,8 +197,8 @@
     }
 
     if ([_mode isEqualToString:@"drag"] || [_mode isEqualToString:@"hold"]) {
-        double nextX = p.dx + (pt.x - pressX);
-        double nextY = p.dy + (pt.y - pressY);
+        double nextX = p.dragX + (pt.x - pressX);
+        double nextY = p.dragY + (pt.y - pressY);
         p.x = fmax([self minX], fmin([self maxX], nextX));
         p.fy = fmax(32.0, fmin(floorY, nextY));
         p.facing = (fabs(pt.x - pressX) > 1.0) ? copysign(1.0, pt.x - pressX) : p.facing;
@@ -216,8 +216,8 @@
     pressing = NO;
     pointerInside = NO;
     _samples = [NSMutableArray array];
-    p.target = p.x;
-    p.targetY = p.gy;
+    p.walkToX = p.x;
+    p.walkToY = p.gy;
     p.speed = 0.0;
 
     if (wasDragging) {
@@ -249,8 +249,8 @@
     pressing = NO;
     pointerInside = NO;
     _samples = [NSMutableArray array];
-    p.target = p.x;
-    p.targetY = p.gy;
+    p.walkToX = p.x;
+    p.walkToY = p.gy;
     p.speed = 0.0;
     [self setAirKind:nil];
     [self setExpression:nil];
@@ -279,8 +279,8 @@
 /// 抓取（开始拖动）
 - (void)grab {
     if (![_mode isEqualToString:@"drag"]) {
-        p.dx = p.x;
-        p.dy = p.fy;
+        p.dragX = p.x;
+        p.dragY = p.fy;
         p.speed = 0.0;
         [self setModeTo:@"drag"];
         [self setExpression:@"dragged"];
@@ -300,13 +300,13 @@
     if (fabs(target - p.x) < 2.0) target = (p.x <= ([self minX] + [self maxX]) * 0.5) ? [self maxX] : [self minX];
     _walkIdentifier = [ident copy];
     _walkWord = nil;
-    p.target = target;
-    p.targetY = p.gy;
+    p.walkToX = target;
+    p.walkToY = p.gy;
     p.speed = 0.0;
     p.skidded = NO;
     [self setExpression:run ? @"run" : nil];
     [self setModeTo:run ? @"run" : @"walk"];
-    [self event:@"walk" detail:@{ @"target": @(p.target), @"run": @(run) }];
+    [self event:@"walk" detail:@{ @"target": @(p.walkToX), @"run": @(run) }];
     return YES;
 }
 
@@ -347,8 +347,8 @@
         @"facing": @(p.facing),
         @"fy": @(p.fy),
         @"gvy": @(p.gvy),
-        @"feet": @[@(p.feet[0][0]), @(p.feet[0][1]),
-                   @(p.feet[1][0]), @(p.feet[1][1])],
+        @"feet": @[@(p.feet[0]), @(p.feet[1]),
+                   @(p.feet[2]), @(p.feet[3])],
         @"blinkT": @(p.blinkT),
         @"blinkAge": @(p.blinkAge),
         @"x": @(p.x),

@@ -35,63 +35,68 @@ struct __IOHIDEvent; struct __AXUIElement; struct __CFMessagePort;
 
 // 运动状态结构体（WNMotion.p 的类型，56 字段 / 464 字节）
 // 字段名与类型从 ivar 的完整 type encoding 还原
+// B 方案：字段名/偏移按 recon 的实测版本（原逆向版从 gap 之后整体错位）
+// 偏移锚点：facing +0x38、low +0xc8、feet +0xf8、hasPrev +0x1d0，整体 0x1d0
 typedef struct WNMotionState {
-    double   x          ;
-    double   fy         ;
-    double   gy         ;
-    double   gvy        ;
-    double   vx         ;
-    double   vy         ;
-    double   facing     ;
-    double   faceVis    ;
-    double   modeT      ;
-    double   dur        ;
-    double   target     ;
-    double   targetY    ;
-    double   speed      ;
-    double   stride     ;
-    double   lift       ;
-    double   bob        ;
-    double   phase      ;
-    double   lean       ;
-    double   tilt       ;
-    double   tiltV      ;
-    double   sq         ;
-    double   sqv        ;
-    double   sitK       ;
-    double   stretch    ;
-    double   low        ;
-    double   drowse     ;
-    double   gap        [2];
-    double   look       [2];
-    double   feet       [2][2];
-    double   blinkT     ;
-    double   blinkAge   ;
-    double   exprUntil  ;
-    double   nextAt     ;
-    double   emitAt     ;
-    double   turnAcc    ;
-    double   dx         ;
-    double   dy         ;
-    double   jumpV      ;
-    double   jumpVx     ;
-    double   blushK     ;
-    double   swapAge    ;
-    double   glance     [2];
-    double   glanceAt   ;
-    double   snoreAt    ;
-    double   swing      ;
-    double   swingV     ;
-    double   prevA      ;
-    double   velX       ;
-    double   talkK      ;
-    double   sfxAt      ;
-    double   noteAt     ;
-    BOOL     hasPrev    ;
-    BOOL     turned     ;
-    BOOL     startle    ;
-    BOOL     willSleep  ;
-    BOOL     skidded    ;
+    double   x           ;
+    double   fy          ;
+    double   gy          ;
+    double   gvy         ;
+    double   vx          ;
+    double   vy          ;
+    double   facing      ;
+    double   faceVis     ;
+    double   modeT       ;
+    double   dwell       ;
+    double   walkToX     ;
+    double   walkToY     ;
+    double   speed       ;
+    double   bob         ;
+    double   lift        ;
+    double   sway        ;
+    double   phase       ;
+    double   lean        ;
+    double   tilt        ;
+    double   tiltV       ;
+    double   sq          ;
+    double   sqv         ;
+    double   sitK        ;
+    double   stretch     ;
+    double   low         ;
+    double   drowse      ;
+    double   gapX        ;
+    double   gapY        ;
+    double   lookX       ;
+    double   lookY       ;
+    double   feet       [4];   // +0xf8..0x110  feet[0].x,.y,feet[1].x,.y
+    double   blinkT      ;
+    double   blinkAge    ;
+    double   exprUntil   ;
+    double   nextAt      ;
+    double   fxCool      ;
+    double   stallT      ;
+    double   dragX       ;
+    double   dragY       ;
+    double   launchY     ;
+    double   launchX     ;
+    double   blushK      ;
+    double   eyeT        ;
+    double   glanceX     ;
+    double   glanceY     ;
+    double   glanceAt    ;
+    double   snoreAt     ;
+    double   swing       ;
+    double   swingV      ;
+    double   prevX       ;
+    double   velX        ;
+    double   talkK       ;
+    double   voiceCool   ;
+    double   nextNoteAt  ;
+    BOOL     hasPrev     ;
+    BOOL     flipOnce    ;
+    BOOL     wokeNow     ;
+    BOOL     sitSeen     ;
+    BOOL     skidded     ;
 } WNMotionState;
 
 @class PDAIAlarms, PDAIMemory, PDAIPetRuntime, PDActiveInterfaceOrientationMonitor, PDAssetManager, PDChatController, PDChatPassthroughView, PDChatService, PDCloudVoiceInput, PDComposerTextView, PDDeviceAXScope, PDDeviceNativeExecutor, PDDeviceTools, PDDoubaoSSEDecoder, PDDoubaoTTS, PDHostRootView, PDInteractionView, PDKeyboardMonitor, PDLocalizationBundle, PDNative_AccessibilityManager, PDNative_AppManager, PDNative_ClipboardManager, PDNative_IOSMCPHIDManager, PDNative_MCPAXAttributeBridge, PDNative_MCPAXNodeSource, PDNative_MCPAXQueryContext, PDNative_MCPAXRemoteContextResolver, PDNative_MCPLogger, PDNative_MCPUIElementSerializer, PDNative_MCPUIElementsFacade, PDNative_ScreenManager, PDNative_TextInputManager, PDOverlayController, PDPetView, PDPreferences, PDReplySpeech, PDRootController, PDSoundPlayer, PDSpeechBubbleView, PDVoice, PDVoiceServiceConnection, PDVoiceTextReveal, PDWindow, WNClip, WNGlowSurface, WNHitMask, WNLiveRig, WNMesh, WNMotion, WNPainter, WNPreparedDeformer, WNRenderer, WNSpring, WNUploadSurface;
@@ -148,7 +153,7 @@ typedef struct WNMotionState {
 #import "WNMesh.h"
 #import "WNMotion.h"
 #import "WNPainter.h"
-#import "WNPreparedDeformer.h"
+// WNPreparedDeformer 已并入 WNLiveRig.m（recon 版，自带 @interface）
 #import "WNRenderer.h"
 #import "WNSpring.h"
 #import "WNUploadSurface.h"
