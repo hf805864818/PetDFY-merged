@@ -637,6 +637,20 @@ static void PDDrawDiag(NSString *fmt, ...) {
 
     // 6) 索引绘制：MTLPrimitiveTypeTriangle(3) / UInt16 / offset 0（0x57ef8）
     /*
+     * 顶点缓冲边界：positions 按 8 字节/顶点布局，m.positionOffset 是该网格的字节偏移。
+     * 素材切换 / 变形器重建期间 positions 可能比网格短，此时 setVertexBuffer:offset:
+     * 会把索引指到 buffer 外面，draw 时 GPU 读越界 -> SIGSEGV（崩 SpringBoard）。
+     */
+    if (positions) {
+        NSUInteger posLen = (NSUInteger)[(id<MTLBuffer>)positions length];
+        if ((NSUInteger)m.positionOffset >= posLen) {
+            NSLog(@"[PetDFY] skip draw: positionOffset %lu >= positions %lu",
+                  (unsigned long)m.positionOffset, (unsigned long)posLen);
+            return;
+        }
+    }
+
+    /*
      * 索引绘制。原版无条件提交；这里加两道防御，避免素材不完整 / 网格半初始化时
      * drawIndexedPrimitives 触发 SIGSEGV（iOS 17 AGX 驱动直接崩 SpringBoard）：
      *   ① buffer 长度必须够 indexCount * sizeof(uint16)
