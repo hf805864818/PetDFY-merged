@@ -77,3 +77,14 @@ assets:
 
 after-install::
 	install.exec "killall -9 SpringBoard" || true
+
+# ---------------------------------------------------------------- arm64e 修正
+# Linux 的 ld64.lld 编 arm64e 时 cpusubtype 仍写 0，dyld 会拒（Preferences.app 尤其严格）。
+# 打包前把 staging 里的 Mach-O header 改成 0x80000002（只改 header，不改代码）。
+before-package::
+	@for f in "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/"*.dylib; do \
+	  [ -f "$$f" ] && python3 tools/fix_arm64e_subtype.py "$$f" || true; \
+	done
+	@if [ -f "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/PetDFYPrefs.bundle/PetDFYPrefs" ]; then \
+	  python3 tools/fix_arm64e_subtype.py "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/PetDFYPrefs.bundle/PetDFYPrefs"; \
+	fi
