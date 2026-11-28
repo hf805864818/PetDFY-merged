@@ -35,6 +35,22 @@ static const double kPDVoiceAudioTimeout   = 3.0;
 static const double kPDVoiceSilenceTimeout = 3.0;
 static const double kPDVoiceMaxDuration    = 120.0;
 
+/*
+ * 【长期改造】连续录音模式开关。
+ * 原版 tick 在「3 秒无语音」或「120 秒上限」时自动 finishOnQueue；
+ * 连续模式下只要用户没主动请求收尾（_finishing == NO）就不结束，
+ * 由「点宠物」等外部动作调用 -finish 来收尾（等价于 VoiceEnhance.dylib 的 hook，
+ * 但不需要额外注入一个 dylib）。
+ *
+ * 偏好键：com.susudear.petdfyprefs 的 AIVoiceContinuous（BOOL，缺省 YES）
+ */
+static BOOL PDVoiceContinuousMode(void) {
+    CFStringRef domain = CFSTR("com.susudear.petdfyprefs");
+    Boolean ok = false;
+    Boolean v = CFPreferencesGetAppBooleanValue(CFSTR("AIVoiceContinuous"), domain, &ok);
+    return ok ? (v ? YES : NO) : YES;      // 未设置时默认开启
+}
+
 /* timer 周期：0x05f5e100 = 100ms；leeway 0x00e4e1c0 = 15ms */
 static const int64_t  kPDVoiceTimerInterval = 100 * NSEC_PER_MSEC;
 static const uint64_t kPDVoiceTimerLeeway   = 15 * NSEC_PER_MSEC;
@@ -422,6 +438,26 @@ static dispatch_queue_t PDVoiceWorkQueue(void) {
         if (now - _stoppingAt > kPDVoiceStopTimeout) {
             [self completeOnQueue:[NSError errorWithDomain:@"PetDFY.CloudVoiceInput"
                                                       code:PDVoiceErrorStopTimeout
+                                                  userInfo:nil]];
+        }
+        return;
+    }
+
+    /*
+     * 【长期改造】连续录音模式
+     *   _finishing == NO（用户还没点结束）时：
+     *     · 不因「3 秒静音」自动结束
+     *     · 不因「120 秒上限」自动结束
+     *     · 只保留音频队列故障检测（麦克风 12 秒无任何数据 → 报错，避免死等）
+     *   _finishing == YES（finish 已被调用）时：走原版收尾路径。
+     *
+     *   等价于 VoiceEnhance.dylib 对 -[PDCloudVoiceInput tick] 的 hook，
+     *   但逻辑内聚在本文件，不再依赖额外注入的 dylib。
+     */
+    if (PDVoiceContinuousMode() && !_finishing) {
+        if (now - _lastAudioAt > kPDVoiceAudioTimeout * 4.0) {
+            [self completeOnQueue:[NSError errorWithDomain:@"PetDFY.CloudVoiceInput"
+                                                      code:PDVoiceErrorAudioQueue
                                                   userInfo:nil]];
         }
         return;
