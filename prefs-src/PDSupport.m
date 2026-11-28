@@ -533,3 +533,29 @@ NSString *PDAssetDownloadURL(NSString *urlString) {
     if (url.host.length == 0) return nil;
     return url.absoluteString ?: trimmed;
 }
+
+
+#pragma mark - 素材路径 / 通知常量（原版导出符号，重建时漏定义）
+
+/// 投递目录：<数据目录>/AssetImports（原版 0x415c，PDAssetImportDirectory）
+NSString *PDAssetImportDirectory(void) {
+    return [PDDataPath() stringByAppendingPathComponent:@"AssetImports"];
+}
+
+/// 投递路径：<AssetImports>/<name>.zip（原版 0x4168，PDAssetImportPath）
+NSString *PDAssetImportPath(NSString *name) {
+    NSString *base = PDAssetImportDirectory();
+    if (![name isKindOfClass:[NSString class]] || name.length == 0) {
+        return base;
+    }
+    return [[base stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"zip"];
+}
+
+/// 素材状态 Darwin 通知（原版 cfstr "com.susudear.petdfy/assets-status"）
+CFStringRef const PDAssetStatusNotification = CFSTR("com.susudear.petdfy/assets-status");
+/// 素材状态偏好键（原版 cfstr "AssetDownloadStatus"）
+CFStringRef const PDAssetStatusPreferenceKey = CFSTR("AssetDownloadStatus");
+/// 命令通知（原版 cfstr "com.susudear.petdfy/command"）
+NSString *PDCommandNotification = @"com.susudear.petdfy/command";
+/// 设置保存通知（原版 cfstr "com.susudear.petdfyprefs/saved"）
+CFStringRef PDPreferencesChangedNotification = CFSTR("com.susudear.petdfyprefs/saved");
