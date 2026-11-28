@@ -59,6 +59,9 @@ static NSDictionary *PDDeviceToolsEnvelope(NSString *receipt) {
               @"images":  @[] };
 }
 
+// 前向声明（定义在文件末尾，调用点在前）
+static NSDictionary *PDDeviceToolsFailureFromError(id error);
+
 @implementation PDDeviceTools
 
 // ---------------------------------------------------------------------------
