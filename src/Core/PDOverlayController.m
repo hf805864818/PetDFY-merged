@@ -329,7 +329,7 @@ static NSString *PDResourceBundlePath(void) {
      * 之前这里遍历 Imported/ + bundle 多个候选并打分，会出现「渲染用一个根、
      * 音效用另一个根」的混用。现在只有一个根，打分逻辑不再需要。
      */
-    NSString *root = [PDAssetBundleRoots() firstObject] ?: @"/var/mobile/Library/Xfy";
+    NSString *root = [PDAssetBundleRoots() firstObject] ?: @"/var/mobile/Xfy";
     return root;
 }
 

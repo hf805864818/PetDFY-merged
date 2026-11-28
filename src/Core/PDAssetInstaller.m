@@ -108,7 +108,7 @@ static NSString *const kPDAssetStateFileName = @".asset-state";
 
 + (NSString *)currentAssetRoot {
     NSMutableArray<NSString *> *cands = [NSMutableArray array];
-    // build.93：只写素材根（/var/mobile/Library/Xfy），不再双写 Imported/（省一份 120 MB）
+    // build.93：只写素材根（/var/mobile/Xfy），不再双写 Imported/（省一份 120 MB）
     for (NSString *r in PDAssetBundleRoots()) {
         if (![cands containsObject:r]) [cands addObject:r];
     }

@@ -126,7 +126,7 @@ static inline NSArray<NSString *> *PDImportSpoolDirectories(void) {
 
 /// 素材根（唯一权威，build.93 起）。
 ///
-/// 为什么是 /var/mobile/Library/Xfy：
+/// 为什么是 /var/mobile/Xfy：
 ///   · 真实路径，RootHide 不重定向 /var/mobile（只重定向 /Library /usr /bin 等）
 ///   · 路径固定，不随 .jbroot-<UUID> 变化（重建越狱也不影响）
 ///   · mobile 用户可读写，导入素材不需要 root
@@ -134,7 +134,7 @@ static inline NSArray<NSString *> *PDImportSpoolDirectories(void) {
 ///
 /// 旧路径 /Library/Application Support/PetDFY.bundle 不再参与读取。
 static inline NSString *PDAssetRootPath(void) {
-    return @"/var/mobile/Library/Xfy";
+    return @"/var/mobile/Xfy";
 }
 
 static inline NSArray<NSString *> *PDAssetBundleRoots(void) {

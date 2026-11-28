@@ -64,10 +64,10 @@ static double PDReadNumber(NSString *key, double def, double lo, double hi) {
 // 【可编辑化扩展】资源根：与安装布局一致（Debian 包安装到 /Library/Application Support/）
 // RootHide 下 /Library 是系统只读、真身在 jbroot，必须经 PDJailbreak 展开。
 static NSString *PDPrefAssetsRoot(void) {
-    // build.93：与主 dylib 共用同一素材根（/var/mobile/Library/Xfy）。
+    // build.93：与主 dylib 共用同一素材根（/var/mobile/Xfy）。
     // 之前这里独立展开 /Library/...，素材在 Xfy 时读不到 model.json，
     // 导致服装目录退回 4 套 fallback（详见后期计划 P1-1）。
-    return [PDAssetBundleRoots() firstObject] ?: @"/var/mobile/Library/Xfy";
+    return [PDAssetBundleRoots() firstObject] ?: @"/var/mobile/Xfy";
 }
 
 /// 服装取值：允许任意非空字符串，但要求它在本机素材里真实存在（model.json 或 outfits/ 目录），

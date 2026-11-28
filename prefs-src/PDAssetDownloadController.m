@@ -12,7 +12,7 @@ extern NSString *PDLocalizedString(NSString *key);
 //
 // 【build.93 改造】在原版 specifiers 基础上做两件事：
 //   1) 分组 footer 补「手动放置素材」的完整说明（含 frames/ 可选）
-//   2) 插入「打开素材目录」按钮，跳到 /var/mobile/Library/Xfy
+//   2) 插入「打开素材目录」按钮，跳到 /var/mobile/Xfy
 - (id)specifiers {
     // 0x7e8c: _OBJC_IVAR_$_PSListController._specifiers（ldrsw 取偏移）
     if (_specifiers == nil) {
@@ -31,7 +31,7 @@ extern NSString *PDLocalizedString(NSString *key);
                 @"· frames/ 可选：占 80 MB，仅帧动画（116 个动作）使用；\n"
                 @"  不放也能显示角色，只是动作播不出来\n"
                 @"· 放好后注销一次（或重启 SpringBoard）生效\n\n"
-                @"素材目录：/var/mobile/Library/Xfy"
+                @"素材目录：/var/mobile/Xfy"
                         forKey:@"footerText"];
             break;
         }
@@ -68,11 +68,11 @@ extern NSString *PDLocalizedString(NSString *key);
 
 #pragma mark - 打开素材目录（build.93 新增）
 
-/// 跳到 /var/mobile/Library/Xfy。
+/// 跳到 /var/mobile/Xfy。
 /// ① 优先 shareddocuments:// 让「文件」App 直接定位到该目录；
 /// ② 不可用时弹窗显示路径，提供「复制路径」/「取消」。
 - (void)openAssetDirectory {
-    static NSString *const kAssetRoot = @"/var/mobile/Library/Xfy";
+    static NSString *const kAssetRoot = @"/var/mobile/Xfy";
 
     NSString *encoded =
         [kAssetRoot stringByAddingPercentEncodingWithAllowedCharacters:

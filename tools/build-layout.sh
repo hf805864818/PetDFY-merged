@@ -128,21 +128,50 @@ if [ -f "$VOICE" ]; then
     chmod 0755 "$VOICE" 2>/dev/null || true
 fi
 
-# ---- build.93：素材根 /var/mobile/Library/Xfy ----
-# 真实路径（不走 jbroot），路径固定，mobile 可写。
-XFY="/var/mobile/Library/Xfy"
-mkdir -p "$XFY" 2>/dev/null || true
-# 渲染必需的代码资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
+# ---- build.94：素材根 /var/mobile/Xfy（严格检查，失败即报错） ----
+# 规则：存在 → 跳过创建；不存在 → 创建；创建失败 → 打印原因并 exit 1（安装失败）。
+XFY="/var/mobile/Xfy"
+
+if [ -d "$XFY" ]; then
+    echo "PetDFY: asset root exists, skip create: $XFY"
+else
+    XFY_ERR="$(mktemp 2>/dev/null || echo /tmp/petdfy-mkdir.$$)"
+    if mkdir -p "$XFY" 2>"$XFY_ERR"; then
+        echo "PetDFY: asset root created: $XFY"
+    else
+        echo "========================================" >&2
+        echo "PetDFY INSTALL FAILED" >&2
+        echo "  cannot create asset root: $XFY" >&2
+        echo "  parent dir state:" >&2
+        ls -ld /var/mobile 2>&1 | sed 's/^/    /' >&2
+        echo "  mkdir error:" >&2
+        sed 's/^/    /' "$XFY_ERR" >&2
+        echo "  whoami: $(id 2>/dev/null)" >&2
+        echo "========================================" >&2
+        rm -f "$XFY_ERR" 2>/dev/null || true
+        exit 1
+    fi
+    rm -f "$XFY_ERR" 2>/dev/null || true
+fi
+
+# 权限：失败只警告（不影响可用性，插件以 mobile 运行但目录已 755）
+chown -hR 501:501 "$XFY" 2>/dev/null || echo "PetDFY: WARN chown failed: $XFY" >&2
+chmod 0755 "$XFY" 2>/dev/null || echo "PetDFY: WARN chmod failed: $XFY" >&2
+
+# 渲染必需资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
 for f in Whale.metal Info.plist; do
-    if [ -f "$BUNDLE/$f" ] && [ ! -f "$XFY/$f" ]; then
-        cp -f "$BUNDLE/$f" "$XFY/$f" 2>/dev/null || true
+    if [ -f "$BUNDLE/$f" ]; then
+        if [ ! -f "$XFY/$f" ]; then
+            cp -f "$BUNDLE/$f" "$XFY/$f" 2>/dev/null \
+                && echo "PetDFY: copied $f" \
+                || echo "PetDFY: WARN copy $f failed" >&2
+        fi
+    else
+        echo "PetDFY: WARN $BUNDLE/$f missing (deb 未装代码资源？)" >&2
     fi
 done
-chown -hR 501:501 "$XFY" 2>/dev/null || true
-chmod 0755 "$XFY" 2>/dev/null || true
-# 素材状态复位，让设置页显示「未安装」而不是「失败」
-/usr/bin/defaults write com.susudear.petdfyprefs AssetDownloadStatus -string "" 2>/dev/null || true
-echo "PetDFY: asset root ready at $XFY" >&2
+
+echo "PetDFY: asset root ready at $XFY"
 
 # 把 dylib / plist / 偏好包镜像进 jbroot（RootHide 注入路径）
 for real in /var/containers/Bundle/Application/.jbroot-* \
@@ -169,7 +198,7 @@ fail=0
 [ -f "$BUNDLE/Whale.metal" ] && echo "  OK Whale.metal" || { echo "  FAIL Whale.metal 缺失" >&2; fail=1; }
 [ -f "layout/Library/Application Support/PetDFY/petdfy-voice" ] && echo "  OK petdfy-voice" || echo "  WARN petdfy-voice 缺失"
 [ -f "$BUNDLE/live/model.json" ] && echo "  OK live/model.json" || echo "  WARN live/model.json 缺失（角色不显示）"
-grep -q '/var/mobile/Library/Xfy' layout/DEBIAN/postinst && echo "  OK postinst 创建 Xfy" || { echo "  FAIL postinst 缺 Xfy 创建" >&2; fail=1; }
+grep -q '/var/mobile/Xfy' layout/DEBIAN/postinst && echo "  OK postinst 创建 Xfy" || { echo "  FAIL postinst 缺 Xfy 创建" >&2; fail=1; }
 [ -f layout/DEBIAN/control ] && echo "  OK control" || { echo "  FAIL control 缺失" >&2; fail=1; }
 
 echo "== layout 大小 =="

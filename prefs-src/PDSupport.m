@@ -33,7 +33,7 @@ extern NSString *PDJbroot(NSString *path) __asm__("__Z6jbrootP8NSString");
 //   b __Z6jbrootP8NSString
 NSString *PDResourcePath(void) {
     /* build.93：与主 dylib 的 PDAssetRootPath() 保持一致（唯一根） */
-    return @"/var/mobile/Library/Xfy";
+    return @"/var/mobile/Xfy";
 }
 
 // 0x0236dc  3 insn（裸常量，不经过 jbroot）
