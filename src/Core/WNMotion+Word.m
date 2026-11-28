@@ -53,6 +53,9 @@
 #import <float.h>
 #import <objc/runtime.h>
 
+// libobjc 私有：runtime.h 不声明，但二进制里是标准 setter 尾调用
+extern void objc_setProperty_nonatomic_copy(id self, SEL _cmd, id newValue, ptrdiff_t offset);
+
 #pragma mark - 词库容器（__DATA_CONST，逐项已解）
 
 // 段布局（Observed）
@@ -66,7 +69,10 @@
 // ── 手势/动作词表 ────────────────────────────────────────────────────────
 // 对象 @0x1075b8（count=16，elements @0x105860）
 // 引用点：[0x424e4] containsObject: 的第 1 道闸门（整个后半段的入口）
-static NSArray *const kWNWordsGesture = @[
+static NSArray *kWNWordsGestureStorage(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = @[
     @"stand",   // [ 0] elem slot 0x105860 → CF 0xf88c8
     @"jump",    // [ 1] elem slot 0x105868 → CF 0xf3b68
     @"hop",     // [ 2] elem slot 0x105870 → CF 0xf9968
@@ -83,34 +89,55 @@ static NSArray *const kWNWordsGesture = @[
     @"shiver",  // [13] elem slot 0x1058c8 → CF 0xf3d68
     @"flap",    // [14] elem slot 0x1058d0 → CF 0xf99e8
     @"dance",   // [15] elem slot 0x1058d8 → CF 0xf3d88
-];
+]; });
+    return a;
+}
+#define kWNWordsGesture kWNWordsGestureStorage()
 
 // ── 模式词表 ──────────────────────────────────────────────────────────────
 // 对象 @0x1075d0（count=5，elements @0x1058e0）
 // 引用点：[0x42728] 命中后 setModeTo:word 并写 p.dwell（dance=3.2，其余 1e9）
-static NSArray *const kWNWordsMode = @[
+static NSArray *kWNWordsModeStorage(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = @[
     @"look",    // [0] elem slot 0x1058e0 → CF 0xf3ca8
     @"dizzy",   // [1] elem slot 0x1058e8 → CF 0xf97c8
     @"sit",     // [2] elem slot 0x1058f0 → CF 0xf38c8
     @"sleep",   // [3] elem slot 0x1058f8 → CF 0xf38e8
     @"dance",   // [4] elem slot 0x105900 → CF 0xf3d88
-];
+]; });
+    return a;
+}
+#define kWNWordsMode kWNWordsModeStorage()
 
 // ── 短脉冲词表 ────────────────────────────────────────────────────────────
 // 对象 @0x1075e8（count=2，elements @0x105908）
 // 引用点：[0x427f8] 命中则 pulse 时长 0.7
-static NSArray *const kWNWordsShortPulse = @[
+static NSArray *kWNWordsShortPulseStorage(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = @[
     @"nod",     // [0] elem slot 0x105908 → CF 0xf3da8
     @"shake",   // [1] elem slot 0x105910 → CF 0xf3c68
-];
+]; });
+    return a;
+}
+#define kWNWordsShortPulse kWNWordsShortPulseStorage()
 
 // ── walk 模式表 ───────────────────────────────────────────────────────────
 // 对象 @0x1075a0（count=2，elements @0x105850）
 // 引用点：[0x42224] stopWalk: 命中当前 mode 时把 mode 复位成 idle
-static NSArray *const kWNModesWalk = @[
+static NSArray *kWNModesWalkStorage(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = @[
     @"walk",    // [0] elem slot 0x105850 → CF 0xf9708
     @"run",     // [1] elem slot 0x105858 → CF 0xf90c8
-];
+]; });
+    return a;
+}
+#define kWNModesWalk kWNModesWalkStorage()
 
 // ── 词 → 音效名 ───────────────────────────────────────────────────────────
 // 对象 @0x1084a8（count=5，keys @0x105918，values @0x105940）
@@ -200,7 +227,7 @@ static NSDictionary *const kWNWordSounds = @{
         // 注释：左半区走 0.55~0.90，右半区走 0.10~0.45（两段都是 0.35 宽，不相交）
 
         double gy;
-        if (self.freeGround) {                                  // [0x42410] ldrb [x20,#0x242]
+        if (self->_freeGround) {                                  // [0x42410] ldrb [x20,#0x242]
             gy = [self rnd:[self minY] to:self.floorY];         // [0x42418..0x42428] floorY +0x1e8
         } else {
             gy = p.gy;                                          // [0x42434] ldr d8,[x20,#0x18]
