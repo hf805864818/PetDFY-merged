@@ -42,12 +42,12 @@ extern void PDAIWritePreferences(NSDictionary *values);            // imp 0x1343
          * 由 PetDFY.dylib 的 PDCloudVoiceInput -tick 读取；
          * 不再依赖 VoiceEnhance.dylib 那种额外 hook。
          */
-        PSSpecifier *group = [PSSpecifier groupSpecifierWithName:PDLocalizedString(@"连续录音")];
-        [group setProperty:PDLocalizedString(@"开启后，录音不会因静音或时长自动结束；点桌宠即可停止并发送。")
+        PSSpecifier *group = [PSSpecifier groupSpecifierWithName:@"连续录音"];
+        [group setProperty:@"开启后，录音不会因静音或时长自动结束；点桌宠即可停止并发送。"
                     forKey:@"footerText"];
 
         PSSpecifier *toggle =
-            [PSSpecifier preferenceSpecifierNamed:PDLocalizedString(@"语音持续录音")
+            [PSSpecifier preferenceSpecifierNamed:@"语音持续录音"
                                             target:self
                                                set:@selector(setVoiceContinuous:specifier:)
                                                get:@selector(voiceContinuous:)
