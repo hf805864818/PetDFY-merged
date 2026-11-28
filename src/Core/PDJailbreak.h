@@ -124,9 +124,20 @@ static inline NSArray<NSString *> *PDImportSpoolDirectories(void) {
     return out;
 }
 
-/// 素材 bundle 根（参考包 1.2.1 的真实读取与安装位置）
+/// 素材 bundle 根。
+///
+/// 顺序很重要：
+///   ① /var/mobile/Library/Application Support/PetDFY.bundle
+///      真实数据目录，**不在 jbroot 里**（RootHide 只重定向 /Library /usr /bin 等系统目录）。
+///      好处：路径固定，不随 .jbroot-<UUID> 变化，用户手动放素材最省事。
+///   ② /Library/Application Support/PetDFY.bundle
+///      原版 1.2.1 的位置；RootHide 下由 PDJailbreakCandidates 展开成
+///      <jbroot>/Library/Application Support/PetDFY.bundle。作为兼容回退。
 static inline NSArray<NSString *> *PDAssetBundleRoots(void) {
     NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *p in PDJailbreakCandidates(@"/var/mobile/Library/Application Support/PetDFY.bundle")) {
+        [out addObject:p];
+    }
     for (NSString *p in PDJailbreakCandidates(@"/Library/Application Support/PetDFY.bundle")) {
         [out addObject:p];
     }
