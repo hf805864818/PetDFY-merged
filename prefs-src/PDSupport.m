@@ -503,3 +503,33 @@ NSDictionary *PDDeviceToolResult(NSDictionary *payload) {
         @"images": images,
     };
 }
+
+
+#pragma mark - 素材下载地址校验（原版 0x4570）
+
+/*
+ * 原版符号 _PDAssetDownloadURL 在偏好包里是导出 C 函数，源码重建时漏了定义，
+ * 导致 dlopen 报 "symbol not found in flat namespace '_PDAssetDownloadURL'"。
+ *
+ * 语义（按调用点 PDRootListController.m:423 反推）：
+ *   非空字符串 → 校验 scheme，合法返回规范化 URL 字符串，否则返回 nil。
+ *   scheme 白名单：http / https（与 __objc_arrayobj 0x100264C80 一致）。
+ */
+NSString *PDAssetDownloadURL(NSString *urlString) {
+    if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) {
+        return nil;
+    }
+    NSString *trimmed = [urlString stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return nil;
+
+    NSURL *url = [NSURL URLWithString:trimmed];
+    if (!url) return nil;
+
+    NSString *scheme = url.scheme.lowercaseString;
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
+        return nil;
+    }
+    if (url.host.length == 0) return nil;
+    return url.absoluteString ?: trimmed;
+}
