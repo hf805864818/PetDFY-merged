@@ -27,14 +27,59 @@ extern void PDAIWritePreferences(NSDictionary *values);            // imp 0x1343
 // imp 0x007f38  types @16@0:8
 - (id)specifiers {
     if (!_specifiers) {
-        _specifiers = [self localizedSpecifiers:@"Speech"];
-        for (PSSpecifier *spec in _specifiers) {
+        NSMutableArray *list = [[self localizedSpecifiers:@"Speech"] mutableCopy];
+        for (PSSpecifier *spec in list) {
             if ([[spec propertyForKey:@"id"] isEqual:@"SpeechStatus"]) {
                 [spec setProperty:PDLocalizedString(PDDoubaoSpeechStatus()) forKey:@"footerText"];
             }
         }
+
+        /*
+         * 【长期改造】语音持续录音开关
+         *   开（默认）：录音不因「3 秒静音」或「120 秒上限」自动结束，点宠物才停
+         *   关：回到原版行为（静音自动结束）
+         * 键：com.susudear.petdfyprefs 的 AIVoiceContinuous
+         * 由 PetDFY.dylib 的 PDCloudVoiceInput -tick 读取；
+         * 不再依赖 VoiceEnhance.dylib 那种额外 hook。
+         */
+        PSSpecifier *group = [PSSpecifier groupSpecifierWithName:PDLocalizedString(@"连续录音")];
+        [group setProperty:PDLocalizedString(@"开启后，录音不会因静音或时长自动结束；点桌宠即可停止并发送。")
+                    forKey:@"footerText"];
+
+        PSSpecifier *toggle =
+            [PSSpecifier preferenceSpecifierNamed:PDLocalizedString(@"语音持续录音")
+                                            target:self
+                                               set:@selector(setVoiceContinuous:specifier:)
+                                               get:@selector(voiceContinuous:)
+                                            detail:nil
+                                              cell:PSSwitchCellType
+                                              edit:nil];
+        [toggle setProperty:@"AIVoiceContinuous" forKey:@"key"];
+        [toggle setProperty:@"com.susudear.petdfyprefs" forKey:@"defaults"];
+        [toggle setProperty:@"com.susudear.petdfyprefs" forKey:@"PostNotification"];
+
+        [list addObject:group];
+        [list addObject:toggle];
+        _specifiers = list;
     }
     return _specifiers;
+}
+
+#pragma mark - 连续录音开关
+
+- (id)voiceContinuous:(PSSpecifier *)specifier {
+    id value = [specifier propertyForKey:@"value"];
+    if (value != nil) return value;
+    // 缺省 YES（与 PetDFY.dylib 的 PDVoiceContinuousMode 一致）
+    CFPreferencesAppSynchronize(CFSTR("com.susudear.petdfyprefs"));
+    Boolean ok = false;
+    Boolean v = CFPreferencesGetAppBooleanValue(CFSTR("AIVoiceContinuous"),
+                                                 CFSTR("com.susudear.petdfyprefs"), &ok);
+    return @(ok ? (v ? YES : NO) : YES);
+}
+
+- (void)setVoiceContinuous:(id)value specifier:(PSSpecifier *)specifier {
+    [self setPreferenceValue:value specifier:specifier];
 }
 
 // imp 0x0080e0  types v16@0:8
