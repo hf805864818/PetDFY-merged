@@ -532,12 +532,21 @@
         if (m.uv) [enc setVertexBuffer:m.uv offset:0 atIndex:1];
         id<MTLTexture> tex = [self texture:m.texture];
         if (tex) [enc setFragmentTexture:tex atIndex:0];
+        // 与 WNRenderer+Draw.m 同款防御：buffer 长度不够 / indexCount 非 3 倍数时不提交，
+        // 否则 iOS 17 的 AGX 驱动会 SIGSEGV 把 SpringBoard 打进安全模式。
         if (m.indexCount > 0 && m.indices) {
-            [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                            indexCount:(NSUInteger)m.indexCount
-                             indexType:MTLIndexTypeUInt16
-                           indexBuffer:m.indices
-                     indexBufferOffset:0];
+            NSUInteger needBytes = (NSUInteger)m.indexCount * sizeof(uint16_t);
+            NSUInteger haveBytes = (NSUInteger)[(id<MTLBuffer>)m.indices length];
+            if (haveBytes >= needBytes && (m.indexCount % 3) == 0) {
+                [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                indexCount:(NSUInteger)m.indexCount
+                                 indexType:MTLIndexTypeUInt16
+                               indexBuffer:m.indices
+                         indexBufferOffset:0];
+            } else {
+                NSLog(@"[PetDFY] skip draw(slot): indexCount=%ld need=%lu have=%lu",
+                      (long)m.indexCount, (unsigned long)needBytes, (unsigned long)haveBytes);
+            }
         }
     }
     [enc endEncoding];
