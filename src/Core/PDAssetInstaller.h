@@ -38,6 +38,16 @@
 /// 该根是否包含渲染所需的完整结构。
 + (BOOL)assetRootIsComplete:(NSString *)root;
 
+/// 【build.95】确保素材根 /var/mobile/Xfy 存在，并把渲染必需的代码资源
+/// （Whale.metal / Info.plist）从 deb 的 PetDFY.bundle 拷过去。
+///
+/// 为什么放在运行时：Sileo 的 postinst 跑在临时 root 里，mkdir 建完就丢弃，
+/// 真实路径永远没有东西。SpringBoard 以 mobile 身份运行，/var/mobile 是
+/// mobile:mobile 755，可写。
+///
+/// 失败时通过 error 返回系统错误（不静默、不换路径）。
++ (BOOL)ensureAssetRootLayout:(NSError **)error;
+
 /// 允许被扫描的投递目录（含 jbroot 展开）。
 + (NSArray<NSString *> *)spoolDirectories;
 

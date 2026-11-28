@@ -171,6 +171,19 @@ static void PDOverlayPrefsChanged(CFNotificationCenterRef center,
 - (BOOL)ensureWindow {
     if (_window) return YES;
 
+    /*
+     * 【build.95】素材根初始化。
+     * postinst 在 Sileo 的临时 root 里跑，mkdir 建完就丢；真实路径得由
+     * 运行时（SpringBoard / mobile）建。失败直接返回 NO，不静默换路径。
+     */
+    NSError *rootErr = nil;
+    if (![PDAssetInstaller ensureAssetRootLayout:&rootErr]) {
+        _lastError = [NSString stringWithFormat:@"asset root: %@",
+                      rootErr.localizedDescription ?: @"unknown"];
+        PDDiag(@"ensureWindow FAIL: %@", _lastError);
+        return NO;
+    }
+
     UIWindowScene *scene = [self mainScene];
     UIWindow *sceneWindow = scene.windows.firstObject;
     if (!scene) {   // 0x7154/0x7174

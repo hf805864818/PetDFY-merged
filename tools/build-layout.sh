@@ -128,50 +128,25 @@ if [ -f "$VOICE" ]; then
     chmod 0755 "$VOICE" 2>/dev/null || true
 fi
 
-# ---- build.94：素材根 /var/mobile/Xfy（严格检查，失败即报错） ----
-# 规则：存在 → 跳过创建；不存在 → 创建；创建失败 → 打印原因并 exit 1（安装失败）。
+# ---- build.95：素材根 /var/mobile/Xfy ----
+# postinst 跑在 Sileo 的临时 root 里，mkdir 建完就丢弃（实测 find 找不到）。
+# 真实目录由 dylib 运行时创建（PDAssetInstaller ensureAssetRootLayout:）。
+# 这里只做提示 + 尽力拷贝（若环境允许）。
 XFY="/var/mobile/Xfy"
 
 if [ -d "$XFY" ]; then
-    echo "PetDFY: asset root exists, skip create: $XFY"
+    echo "PetDFY: asset root exists: $XFY"
 else
-    XFY_ERR="$(mktemp 2>/dev/null || echo /tmp/petdfy-mkdir.$$)"
-    if mkdir -p "$XFY" 2>"$XFY_ERR"; then
-        echo "PetDFY: asset root created: $XFY"
-    else
-        echo "========================================" >&2
-        echo "PetDFY INSTALL FAILED" >&2
-        echo "  cannot create asset root: $XFY" >&2
-        echo "  parent dir state:" >&2
-        ls -ld /var/mobile 2>&1 | sed 's/^/    /' >&2
-        echo "  mkdir error:" >&2
-        sed 's/^/    /' "$XFY_ERR" >&2
-        echo "  whoami: $(id 2>/dev/null)" >&2
-        echo "========================================" >&2
-        rm -f "$XFY_ERR" 2>/dev/null || true
-        exit 1
-    fi
-    rm -f "$XFY_ERR" 2>/dev/null || true
+    echo "PetDFY: asset root will be created at first launch: $XFY"
+    echo "         (postinst runs in a temp root; the tweak creates the real dir)"
 fi
 
-# 权限：失败只警告（不影响可用性，插件以 mobile 运行但目录已 755）
-chown -hR 501:501 "$XFY" 2>/dev/null || echo "PetDFY: WARN chown failed: $XFY" >&2
-chmod 0755 "$XFY" 2>/dev/null || echo "PetDFY: WARN chmod failed: $XFY" >&2
-
-# 渲染必需资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
+# 尽力拷贝（在临时 root 里通常无效，不影响运行）
 for f in Whale.metal Info.plist; do
-    if [ -f "$BUNDLE/$f" ]; then
-        if [ ! -f "$XFY/$f" ]; then
-            cp -f "$BUNDLE/$f" "$XFY/$f" 2>/dev/null \
-                && echo "PetDFY: copied $f" \
-                || echo "PetDFY: WARN copy $f failed" >&2
-        fi
-    else
-        echo "PetDFY: WARN $BUNDLE/$f missing (deb 未装代码资源？)" >&2
+    if [ -f "$BUNDLE/$f" ] && [ ! -f "$XFY/$f" ]; then
+        cp -f "$BUNDLE/$f" "$XFY/$f" 2>/dev/null || true
     fi
 done
-
-echo "PetDFY: asset root ready at $XFY"
 
 # 把 dylib / plist / 偏好包镜像进 jbroot（RootHide 注入路径）
 for real in /var/containers/Bundle/Application/.jbroot-* \

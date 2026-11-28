@@ -23,6 +23,48 @@ static NSString *const kPDAssetStateFileName = @".asset-state";
 
 @implementation PDAssetInstaller
 
+
+
+#pragma mark - build.95 素材根初始化
+
++ (BOOL)ensureAssetRootLayout:(NSError **)error {
+    static NSString *const kRoot = @"/var/mobile/Xfy";
+    static NSString *const kBundle = @"/Library/Application Support/PetDFY.bundle";
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // ① 建根目录（存在则跳过）
+    if (![fm fileExistsAtPath:kRoot]) {
+        NSError *err = nil;
+        if (![fm createDirectoryAtPath:kRoot
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:&err]) {
+            NSLog(@"[PetDFY] FATAL cannot create asset root %@: %@", kRoot, err);
+            if (error) *error = err;
+            return NO;
+        }
+        NSLog(@"[PetDFY] created asset root: %@", kRoot);
+    }
+
+    // ② 拷渲染必需资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
+    for (NSString *name in @[@"Whale.metal", @"Info.plist"]) {
+        NSString *dst = [kRoot stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:dst]) continue;
+
+        NSString *src = [kBundle stringByAppendingPathComponent:name];
+        if (![fm fileExistsAtPath:src]) {
+            NSLog(@"[PetDFY] WARN missing %@ (deb 未装代码资源？)", src);
+            continue;
+        }
+        NSError *cerr = nil;
+        if (![fm copyItemAtPath:src toPath:dst error:&cerr]) {
+            NSLog(@"[PetDFY] WARN copy %@ failed: %@", name, cerr);
+        } else {
+            NSLog(@"[PetDFY] copied %@ -> %@", name, kRoot);
+        }
+    }
+    return YES;
+}
 #pragma mark - 路径
 
 + (NSArray<NSString *> *)spoolDirectories {

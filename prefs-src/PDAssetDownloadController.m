@@ -101,6 +101,14 @@ extern NSString *PDLocalizedString(NSString *key);
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+/// 【build.95】每次进入都重建 specifier 列表。
+/// 之前 _specifiers 只在首次构建，NSBundle 缓存旧 Assets.plist，
+/// 导致 footer 说明第一次不显示、返回桌面再进才出现。
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadSpecifiers];
+}
+
 // imp 0x007ed0  types v16@0:8
 - (void)viewDidLoad {
     [super viewDidLoad];
