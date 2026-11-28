@@ -14,6 +14,15 @@
 
 @class PSSpecifier;
 
+/// Preferences 的 cell 类型常量（PSSwitchCell = 6，见 Preferences 私有头）
+#ifndef PSSwitchCellType
+#define PSSwitchCellType 6
+#define PSGroupCellType  0
+#define PSButtonCellType 2
+#define PSSliderCellType 5
+#define PSLinkCellType   1
+#endif
+
 #pragma mark - PSSpecifier
 
 @interface PSSpecifier : NSObject
