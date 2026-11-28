@@ -52,15 +52,15 @@ jobs:
           fi
           grep -m1 '^Version:' control
 
-      - name: Build layout
-        run: |
-          set -o pipefail
-          bash tools/build-layout.sh 2>&1 | tee layout.log
-
       - name: Build PetDFYPrefs from source
         continue-on-error: true
         run: |
           bash tools/build-prefs.sh 2>&1 | tee prefs.log || echo "prefs 源码编译失败，回退 vendor 二进制"
+
+      - name: Build layout (picks up source-built prefs)
+        run: |
+          set -o pipefail
+          bash tools/build-layout.sh 2>&1 | tee layout.log
 
       - name: Build dylibs + package
         run: |
