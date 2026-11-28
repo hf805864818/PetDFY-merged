@@ -57,6 +57,14 @@ jobs:
         run: |
           bash tools/build-prefs.sh 2>&1 | tee prefs.log || echo "prefs 源码编译失败，回退 vendor 二进制"
 
+      - name: Prefs build fallback check
+        run: |
+          if [ -f build/prefs/PetDFYPrefs ]; then
+            echo "prefs 源码编译成功"
+          else
+            echo "::warning title=Prefs fallback::prefs-src 编译失败，已回退 vendor 二进制（设置页可能仍是旧版）"
+          fi
+
       - name: Build layout (picks up source-built prefs)
         run: |
           set -o pipefail

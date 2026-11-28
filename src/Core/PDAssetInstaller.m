@@ -28,8 +28,13 @@ static NSString *const kPDAssetStateFileName = @".asset-state";
 #pragma mark - build.95 素材根初始化
 
 + (BOOL)ensureAssetRootLayout:(NSError **)error {
-    static NSString *const kRoot = @"/var/mobile/Xfy";
-    static NSString *const kBundle = @"/Library/Application Support/PetDFY.bundle";
+    // build.96：素材根与代码资源包都必须显式经过 jbroot 展开。
+    // 裸 /var/mobile/Xfy 在 SpringBoard 里是另一个物理目录（见 PDJailbreak.h）。
+    NSString *kRoot = PDAssetRootPath();
+    NSString *kBundle = nil;
+    for (NSString *cand in PDJailbreakCandidates(@"/Library/Application Support/PetDFY.bundle")) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:cand]) { kBundle = cand; break; }
+    }
     NSFileManager *fm = [NSFileManager defaultManager];
 
     // ① 建根目录（存在则跳过）
@@ -47,7 +52,8 @@ static NSString *const kPDAssetStateFileName = @".asset-state";
     }
 
     // ② 拷渲染必需资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
-    for (NSString *name in @[@"Whale.metal", @"Info.plist"]) {
+    //    kBundle 找不到时跳过：WNRenderer 还有内嵌源码兜底（PDWhaleShader.h）
+    for (NSString *name in kBundle ? @[@"Whale.metal", @"Info.plist"] : @[]) {
         NSString *dst = [kRoot stringByAppendingPathComponent:name];
         if ([fm fileExistsAtPath:dst]) continue;
 

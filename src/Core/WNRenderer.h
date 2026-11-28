@@ -49,6 +49,7 @@ typedef struct WNLook {
     BOOL _darkAppearance;
     BOOL _didSubmitFrame;
     BOOL _buildsInteractionPath;
+    BOOL _renderDisabled;
     float _glowAlpha;
     id<MTLDevice> _device;
     NSArray * _catalog;
@@ -130,6 +131,8 @@ typedef struct WNLook {
 @property (nonatomic) unsigned long long uploadFrame;
 @property (nonatomic, strong) NSMutableDictionary * multisampleTargets;
 @property (nonatomic) BOOL didSubmitFrame;
+/// 着色器/管线不可用时置 YES：draw 直接早退，绝不带空管线提交（build.96）
+@property (nonatomic) BOOL renderDisabled;
 @property (nonatomic, readonly) NSDictionary * clipInfo;
 @property (nonatomic) long long frameIndex;
 @property (nonatomic) BOOL playing;
@@ -161,6 +164,8 @@ typedef struct WNLook {
 - (void *)liveFigureLook;
 - (void)encodeClip:(id)arg1 frame:(unsigned long long)arg2 descriptor:(id)arg3 command:(id)arg4 offset:(CGPoint)arg5;
 - (void)resetLiveWithScheme:(id)arg1 freeGround:(BOOL)arg2;
+/// build.96：换装时一次性重建，outfit 参与模型装配
+- (void)resetLiveWithScheme:(id)arg1 outfit:(id)arg2 freeGround:(BOOL)arg3;
 - (void)resetFrameClock;
 - (void)setStageSize:(CGSize)arg1;
 - (void)setResponsiveInteraction:(BOOL)arg1;

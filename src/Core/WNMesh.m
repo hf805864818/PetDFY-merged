@@ -30,6 +30,12 @@
 - (unsigned long long)indexCount { return _indexCount; }
 - (void)setIndexCount:(unsigned long long)v { _indexCount = v; }
 
+- (unsigned long long)vertexCount { return _vertexCount; }
+- (void)setVertexCount:(unsigned long long)v { _vertexCount = v; }
+
+- (unsigned int)maxIndex { return _maxIndex; }
+- (void)setMaxIndex:(unsigned int)v { _maxIndex = v; }
+
 - (BOOL)multiply { return _multiply; }
 - (void)setMultiply:(BOOL)v { _multiply = v; }
 

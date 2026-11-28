@@ -589,7 +589,7 @@ static BOOL PDInstallCombinedArchive(void) {
 
     [_pet cancelInteraction];
 
-    [renderer resetLiveWithScheme:scheme freeGround:YES];
+    [renderer resetLiveWithScheme:scheme outfit:outfit freeGround:YES];
 
     // 重置后再取一次 motion，把随机相位装进去（原版 0xa070 调 _arc4random）
     WNMotion *fresh = renderer.liveRig.motion;
@@ -610,6 +610,7 @@ static BOOL PDInstallCombinedArchive(void) {
     // ---- 可编辑化扩展：让渲染器知道主题/服装与资源根，发色引擎据此工作 ----
     if (renderer) {
         renderer.liveRig.scheme = scheme;
+        // build.96：outfit 已在 resetLiveWithScheme:outfit: 里参与装配，这里只是同步 ivar
         renderer.liveRig.outfit = outfit;
         // 兜底也走越狱根展开：RootHide 下 /Library 是系统只读，真身在 jbroot
         renderer.resourceURL = renderer.resourceURL ?: [NSURL fileURLWithPath:PDResourceBundlePath()];

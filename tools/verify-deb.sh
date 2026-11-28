@@ -63,8 +63,28 @@ else:
 PY
 
 echo "== 设置面板 =="
-if [ -d "$TMP/Library/PreferenceBundles/PetDFYPrefs.bundle" ]; then
-    ls "$TMP/Library/PreferenceBundles/PetDFYPrefs.bundle" | head
+PREFS_DIR="$TMP/Library/PreferenceBundles/PetDFYPrefs.bundle"
+if [ -d "$PREFS_DIR" ]; then
+    ls "$PREFS_DIR" | head
+    if [ -f "$PREFS_DIR/Root.plist" ]; then
+        if ! python3 - "$PREFS_DIR/Root.plist" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+n = 0
+for it in d.get("items", []):
+    if it.get("key") == "Outfit":
+        n = len(it.get("validValues", []))
+print(f"  Outfit validValues={n}")
+sys.exit(0 if n >= 15 else 1)
+PY
+        then
+            echo "FAIL: 设置页服装少于 15 项（Root.plist 未覆盖？）" >&2
+            fail=1
+        fi
+    else
+        echo "FAIL: 缺 Root.plist" >&2
+        fail=1
+    fi
 else
     echo "FAIL: 缺 PetDFYPrefs.bundle" >&2
     fail=1
@@ -72,8 +92,14 @@ fi
 
 echo "== 素材骨架 =="
 BUNDLE="$TMP/Library/Application Support/PetDFY.bundle"
-[ -f "$BUNDLE/Whale.metal" ] && echo "  OK Whale.metal" || echo "  WARN 缺 Whale.metal"
-[ -f "$BUNDLE/live/model.json" ] && echo "  OK live/model.json" || echo "  WARN 缺 live/model.json（角色不显示）"
+if [ -d "$BUNDLE" ]; then
+    # build.96：着色器是渲染硬依赖，bundle 存在时必须随包；缺了会在运行时走内嵌兜底，
+    # 但打包阶段就该报出来，避免又出现 build.95 那种“素材根没 Whale.metal”的静默故障。
+    [ -f "$BUNDLE/Whale.metal" ] && echo "  OK Whale.metal" || { echo "  FAIL 缺 Whale.metal" >&2; fail=1; }
+    [ -f "$BUNDLE/live/model.json" ] && echo "  OK live/model.json" || echo "  WARN 缺 live/model.json（程序/素材分离包允许）"
+else
+    echo "  WARN 无 PetDFY.bundle（程序/素材分离包）"
+fi
 
 echo "== 语音 helper =="
 V="$TMP/Library/Application Support/PetDFY/petdfy-voice"
@@ -81,7 +107,7 @@ V="$TMP/Library/Application Support/PetDFY/petdfy-voice"
 
 echo "== 合并产物标识（第一套修复点）=="
 DYLIB="$TMP/Library/MobileSubstrate/DynamicLibraries/PetDFY.dylib"
-for s in "PetDFY.Import" "AssetImports" "asset-import-token" "PDZipExtract" "build.077" "model injected"; do
+for s in "PetDFY.Import" "AssetImports" "asset-import-token" "PDZipExtract" "boot guard" "model injected"; do
     if strings -a "$DYLIB" | grep -q "$s"; then
         echo "  OK $s"
     else

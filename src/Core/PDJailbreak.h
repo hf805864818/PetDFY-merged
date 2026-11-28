@@ -16,6 +16,7 @@
 
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
+#import <mach-o/dyld.h>
 
 /// 已探测到的越狱根前缀列表，按优先级排列。
 /// 元素是「前缀字符串」，后缀为空表示 rootful（直接用绝对路径）。
@@ -124,16 +125,52 @@ static inline NSArray<NSString *> *PDImportSpoolDirectories(void) {
     return out;
 }
 
-/// 素材根（唯一权威，build.93 起）。
+/// 取 PetDFY.dylib 所在的越狱根（jbroot）。
 ///
-/// 为什么是 /var/mobile/Xfy：
-///   · 真实路径，RootHide 不重定向 /var/mobile（只重定向 /Library /usr /bin 等）
-///   · 路径固定，不随 .jbroot-<UUID> 变化（重建越狱也不影响）
-///   · mobile 用户可读写，导入素材不需要 root
-///   · 用户在「文件」App 里能直接看到，方便手动放素材
+/// 为什么需要它：RootHide 下同一个 `/var/mobile` 在 SpringBoard 与越狱 App
+/// （Filza / NewTerm / Sileo）里解析到**不同物理目录**：
+///   · SpringBoard：真实 /var/mobile
+///   · 越狱 App  ：<jbroot>/var/mobile
+/// 因此任何一方用裸 /var/mobile 写素材，另一方都读不到。用 dladdr 拿到
+/// dylib 自身路径 -> 反推 jbroot -> 拼出「两边都一致」的绝对路径。
 ///
-/// 旧路径 /Library/Application Support/PetDFY.bundle 不再参与读取。
+/// 返回：
+///   RootHide  ：/var/containers/Bundle/Application/.jbroot-XXXX（不含尾部 /）
+///   rootless  ：/var/jb
+///   rootful   ：空串
+static inline NSString *PDTweakJBRoot(void) {
+    static NSString *root;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+            const char *n = _dyld_get_image_name(i);
+            if (!n) continue;
+            NSString *p = [NSString stringWithUTF8String:n];
+            if (![p.lastPathComponent isEqualToString:@"PetDFY.dylib"]) continue;
+            // <jbroot>/usr/lib/TweakInject/PetDFY.dylib
+            NSString *d = p.stringByDeletingLastPathComponent;  // TweakInject
+            d = d.stringByDeletingLastPathComponent;            // lib
+            d = d.stringByDeletingLastPathComponent;            // usr
+            root = d.stringByDeletingLastPathComponent;         // jbroot
+            break;
+        }
+    });
+    return root ?: @"";
+}
+
+/// 素材根（唯一权威，build.96 起）。
+///
+/// 逻辑路径仍是 /var/mobile/Xfy（用户在 Filza 里看到的就是它），
+/// 但返回时显式拼上 jbroot，保证 SpringBoard 也能命中同一物理目录。
 static inline NSString *PDAssetRootPath(void) {
+    NSString *jb = PDTweakJBRoot();
+    if ([jb containsString:@".jbroot"]) {
+        return [jb stringByAppendingString:@"/var/mobile/Xfy"];
+    }
+    if ([jb isEqualToString:@"/var/jb"]) {
+        // rootless：/var/mobile 是共享的
+        return @"/var/mobile/Xfy";
+    }
     return @"/var/mobile/Xfy";
 }
 

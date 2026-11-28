@@ -30,6 +30,8 @@
 
 #import "WNRenderer.h"
 #import "PDBoot.h"
+#import "PDJailbreak.h"
+#import "PDWhaleShader.h"
 #import "WNLiveRig.h"
 #import "WNPainter.h"
 #import "WNClip.h"
@@ -39,6 +41,10 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
+
+@interface WNRenderer (PDTransparentTexture)
+- (id<MTLTexture>)pd_transparentTexture;   // 实现在 WNRenderer+Draw.m
+@end
 
 @implementation WNRenderer
 
@@ -85,6 +91,11 @@
     _liveTextures   = [NSMutableDictionary dictionary];
     _failedTextures = [NSMutableSet set];
     _hitTextures    = [NSMutableDictionary dictionary];
+    // build.96：这两个字典原来从未初始化，getter 返回 nil，导致
+    //   · targets[key] = msaa 是空操作 -> 每帧重新分配 4x MSAA 纹理
+    //   · [livePositionBuffers removeAllObjects] 是空调用 -> 三缓冲形同虚设
+    _multisampleTargets  = [NSMutableDictionary dictionary];
+    _livePositionBuffers = [NSMutableDictionary dictionary];
 
     _performanceSamples = [NSMutableArray array];
     _simulationFPS = 60;
@@ -101,66 +112,78 @@
         _catalog = [clips isKindOfClass:[NSArray class]] ? clips : @[];
     }
 
-    // ---- Whale.metal ----
-    NSURL *shaderURL = [url URLByAppendingPathComponent:@"Whale.metal"];
-    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:[shaderURL path]];
-    if (!exists) {
-        shaderURL = [[NSBundle mainBundle] URLForResource:@"Whale" withExtension:@"metal"];
+    // ---- Whale.metal（build.96：四处候选 + 内嵌源码兜底）----
+    // 旧实现只查 resourceURL/Whale.metal 与 mainBundle；两者任一缺失就静默
+    // 跳过整段 -> 三条管线全 nil -> draw 仍提交 -> AGX 空指针崩溃。
+    NSMutableArray<NSURL *> *shaderCandidates = [NSMutableArray array];
+    if (url) [shaderCandidates addObject:[url URLByAppendingPathComponent:@"Whale.metal"]];
+    for (NSString *cand in PDJailbreakCandidates(@"/Library/Application Support/PetDFY.bundle/Whale.metal")) {
+        [shaderCandidates addObject:[NSURL fileURLWithPath:cand]];
     }
+    NSURL *mainShader = [[NSBundle mainBundle] URLForResource:@"Whale" withExtension:@"metal"];
+    if (mainShader) [shaderCandidates addObject:mainShader];
 
     NSString *src = nil;
-    if (shaderURL) {
-        src = [NSString stringWithContentsOfURL:shaderURL
-                                       encoding:NSUTF8StringEncoding     // 4
-                                          error:NULL];
+    for (NSURL *u in shaderCandidates) {
+        if (!u.path.length || ![[NSFileManager defaultManager] fileExistsAtPath:u.path]) continue;
+        src = [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:NULL];
+        if (src.length) { PDInitLog(@"shader: %@", u.path); break; }
     }
-    if (src.length) {
-        NSError *err = nil;
-        id<MTLLibrary> lib = [_device newLibraryWithSource:src options:nil error:&err];
-        if (!lib) {
-            [NSException raise:@"ShaderError" format:@"%@", err];
-            return nil;
-        }
+    if (!src.length) {
+        src = [NSString stringWithUTF8String:kPDWhaleShaderSource];
+        PDInitLog(@"shader: embedded fallback (%lu bytes)", (unsigned long)src.length);
+    }
 
-        // 0x5668c 起：二进制在 init 内逐条建三套管线（normal / multiply / silhouette）
+    NSError *err = nil;
+    id<MTLLibrary> lib = src.length ? [_device newLibraryWithSource:src options:nil error:&err] : nil;
+    if (!lib) {
+        _renderDisabled = YES;
+        PDInitLog(@"FATAL shader compile failed: %@", err.localizedDescription ?: @"nil library");
+    } else {
         id<MTLFunction> vfn = [lib newFunctionWithName:@"whaleVertex"];
         id<MTLFunction> ffn = [lib newFunctionWithName:@"whaleFragment"];
         id<MTLFunction> sfn = [lib newFunctionWithName:@"whaleSilhouetteFragment"];
         if (!vfn || !ffn) {
-            [NSException raise:@"ShaderError" format:@"missing shader functions"];
-            return nil;
-        }
+            _renderDisabled = YES;
+            PDInitLog(@"FATAL shader functions missing (v=%d f=%d)", vfn != nil, ffn != nil);
+        } else {
+            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+            [pd setVertexFunction:vfn];
+            [pd setFragmentFunction:ffn];
+            [pd setRasterSampleCount:4];
 
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        [pd setVertexFunction:vfn];
-        [pd setFragmentFunction:ffn];
-        [pd setRasterSampleCount:4];
+            MTLRenderPipelineColorAttachmentDescriptor *att = [pd colorAttachments][0];
+            [att setPixelFormat:MTLPixelFormatBGRA8Unorm];
+            [att setBlendingEnabled:YES];
+            [att setSourceRGBBlendFactor:MTLBlendFactorSourceAlpha];
+            [att setDestinationRGBBlendFactor:MTLBlendFactorOneMinusSourceAlpha];
+            [att setSourceAlphaBlendFactor:MTLBlendFactorOne];
+            [att setDestinationAlphaBlendFactor:MTLBlendFactorOneMinusSourceAlpha];
 
-        MTLRenderPipelineColorAttachmentDescriptor *att = [pd colorAttachments][0];
-        [att setPixelFormat:MTLPixelFormatBGRA8Unorm];
-        [att setBlendingEnabled:YES];
-        [att setSourceRGBBlendFactor:MTLBlendFactorSourceAlpha];
-        [att setDestinationRGBBlendFactor:MTLBlendFactorOneMinusSourceAlpha];
-        [att setSourceAlphaBlendFactor:MTLBlendFactorOne];
-        [att setDestinationAlphaBlendFactor:MTLBlendFactorOneMinusSourceAlpha];
+            NSError *pipeErr = nil;
+            _normalPipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
+            if (!_normalPipeline) {
+                _renderDisabled = YES;
+                PDInitLog(@"FATAL normal pipeline: %@", pipeErr.localizedDescription ?: @"nil");
+            }
 
-        NSError *pipeErr = nil;
-        _normalPipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
-        if (!_normalPipeline) NSLog(@"[WNRenderer] PipelineError: %@", pipeErr.localizedDescription);
-
-        [att setSourceRGBBlendFactor:MTLBlendFactorDestinationColor];
-        [att setDestinationRGBBlendFactor:MTLBlendFactorZero];
-        [att setSourceAlphaBlendFactor:MTLBlendFactorOne];
-        [att setDestinationAlphaBlendFactor:MTLBlendFactorZero];
-        pipeErr = nil;
-        _multiplyPipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
-
-        if (sfn) {
-            [pd setFragmentFunction:sfn];
-            [att setSourceRGBBlendFactor:MTLBlendFactorOne];
+            [att setSourceRGBBlendFactor:MTLBlendFactorDestinationColor];
             [att setDestinationRGBBlendFactor:MTLBlendFactorZero];
+            [att setSourceAlphaBlendFactor:MTLBlendFactorOne];
+            [att setDestinationAlphaBlendFactor:MTLBlendFactorZero];
             pipeErr = nil;
-            _silhouettePipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
+            _multiplyPipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
+            if (!_multiplyPipeline) PDInitLog(@"WARN multiply pipeline nil: %@", pipeErr.localizedDescription ?: @"nil");
+
+            if (sfn) {
+                [pd setFragmentFunction:sfn];
+                [att setSourceRGBBlendFactor:MTLBlendFactorOne];
+                [att setDestinationRGBBlendFactor:MTLBlendFactorZero];
+                pipeErr = nil;
+                _silhouettePipeline = [_device newRenderPipelineStateWithDescriptor:pd error:&pipeErr];
+            }
+            PDInitLog(@"shader: pipelines ready normal=%d multiply=%d silhouette=%d",
+                      _normalPipeline != nil, _multiplyPipeline != nil, _silhouettePipeline != nil);
         }
     }
 
@@ -180,6 +203,9 @@
         uint16_t tri[6] = {0, 1, 2, 0, 2, 3};
         WNMesh *quad = [WNMesh new];
         [quad setIndexCount:6];
+        // build.96：pd_drawMesh 现在按 vertexCount/maxIndex 校验区间，quad 必须补齐
+        [quad setVertexCount:4];
+        [quad setMaxIndex:3];
         [quad setUv:[_device newBufferWithBytes:uvs length:sizeof(uvs)
                                         options:MTLResourceStorageModeShared]];
         [quad setIndices:[_device newBufferWithBytes:tri length:sizeof(tri)
@@ -490,9 +516,18 @@
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
     if (!enc) return;
 
-    if (_silhouettePipeline) [enc setRenderPipelineState:_silhouettePipeline];
+    // build.96：管线为 nil 时整段剪影跳过。原实现 if(_silhouettePipeline) 只是
+    // 不设置管线，随后仍 drawIndexedPrimitives -> 与本机 0x408 崩溃同型。
+    if (!_silhouettePipeline) {
+        static BOOL loggedSil = NO;
+        if (!loggedSil) { loggedSil = YES; PDInitLog(@"skip silhouette: pipeline nil"); }
+        [enc endEncoding];
+        return;
+    }
+    [enc setRenderPipelineState:_silhouettePipeline];
 
-    if (pos) [enc setVertexBuffer:pos offset:0 atIndex:0];
+    if (!pos) { [enc endEncoding]; return; }
+    [enc setVertexBuffer:pos offset:0 atIndex:0];
 
     float space[4] = {
         (float)(_stageSize.width  > 0 ? _stageSize.width  : (float)target.width),
@@ -523,15 +558,17 @@
     [enc setFragmentBytes:&look length:sizeof(WNLook) atIndex:0];
 
     NSArray *meshes = [clip meshes];
+    NSUInteger posLen = (NSUInteger)[(id<MTLBuffer>)pos length];
     for (WNMesh *m in meshes) {
         if (![m isKindOfClass:[WNMesh class]]) continue;
-        if (pos) {
-            NSUInteger offset = (NSUInteger)[m positionOffset];          // positionOffset
-            [enc setVertexBuffer:pos offset:offset atIndex:0];
-        }
-        if (m.uv) [enc setVertexBuffer:m.uv offset:0 atIndex:1];
+        if (m.vertexCount == 0) continue;
+        NSUInteger end = (NSUInteger)[m positionOffset] + ((NSUInteger)m.maxIndex + 1) * 8;
+        if (end > posLen) continue;
+        [enc setVertexBuffer:pos offset:(NSUInteger)[m positionOffset] atIndex:0];
+        if (!m.uv || m.uv.length < 8) continue;
+        [enc setVertexBuffer:m.uv offset:0 atIndex:1];
         id<MTLTexture> tex = [self texture:m.texture];
-        if (tex) [enc setFragmentTexture:tex atIndex:0];
+        [enc setFragmentTexture:(tex ?: [self pd_transparentTexture]) atIndex:0];
         // 与 WNRenderer+Draw.m 同款防御：buffer 长度不够 / indexCount 非 3 倍数时不提交，
         // 否则 iOS 17 的 AGX 驱动会 SIGSEGV 把 SpringBoard 打进安全模式。
         if (m.indexCount > 0 && m.indices) {
@@ -665,8 +702,14 @@
 - (void)setGlowAlpha:(float)v { _glowAlpha = v; }
 - (unsigned long long)uploadFrame { return _uploadFrame; }
 - (void)setUploadFrame:(unsigned long long)v { _uploadFrame = v; }
-- (NSMutableDictionary *)multisampleTargets { return _multisampleTargets; }
+- (NSMutableDictionary *)multisampleTargets {
+    if (!_multisampleTargets) _multisampleTargets = [NSMutableDictionary dictionary];
+    return _multisampleTargets;
+}
 - (void)setMultisampleTargets:(NSMutableDictionary *)v { _multisampleTargets = v; }
+
+- (BOOL)renderDisabled { return _renderDisabled; }
+- (void)setRenderDisabled:(BOOL)v { _renderDisabled = v; }
 - (BOOL)didSubmitFrame { return _didSubmitFrame; }
 - (void)setDidSubmitFrame:(BOOL)v { _didSubmitFrame = v; }
 - (long long)frameIndex { return _frameIndex; }
@@ -856,7 +899,11 @@ static NSDictionary *WNLoadClipJSON(NSURL *url) {
 // 由 rig.model[@"parts"] 派生 liveClip.meshes 与 liveTint → 复位时钟与偏移。
 // seed 常量 0x12345（mov w4,#0x2345 / movk w4,#1,lsl 16）。
 - (void)resetLiveWithScheme:(id)scheme freeGround:(BOOL)freeGround {
-    PDInitLog(@"resetLive: begin scheme=%@", scheme);
+    [self resetLiveWithScheme:scheme outfit:nil freeGround:freeGround];
+}
+
+- (void)resetLiveWithScheme:(id)scheme outfit:(id)outfit freeGround:(BOOL)freeGround {
+    PDInitLog(@"resetLive: begin scheme=%@ outfit=%@", scheme, outfit ?: @"maid");
     [[self liveTextures] removeAllObjects];
     [[self textures] removeAllObjects];
     [[self failedTextures] removeAllObjects];
@@ -874,6 +921,7 @@ static NSDictionary *WNLoadClipJSON(NSURL *url) {
     PDInitLog(@"resetLive: rig init begin");
     WNLiveRig *rig = [[WNLiveRig alloc] initWithResourceURL:[self resourceURL]
                                                      scheme:scheme
+                                                     outfit:(outfit ?: @"maid")
                                                        seed:0x12345
                                                  freeGround:freeGround];
     PDInitLog(@"resetLive: rig init OK");
@@ -899,7 +947,10 @@ static NSDictionary *WNLoadClipJSON(NSURL *url) {
     // 语义上等于给每个 part 预留一个空 tint 槽；此处按观测字节直译。
     NSMutableArray *tint = [NSMutableArray new];
     for (NSUInteger i = 0; i < [parts count]; i++) {
-        [tint addObject:(id)[NSArray class]];
+        // build.96：原写法把类对象 [NSArray class] 塞进数组，encodeClip 里
+        // [t isKindOfClass:[NSArray class]] 对类对象恒为 NO -> tint 永远走默认值。
+        // 这里直接给常量 tint（白色、不染色）。
+        [tint addObject:@[@1.0f, @1.0f, @1.0f, @0.0f]];
     }
     [self setLiveTint:tint];
 

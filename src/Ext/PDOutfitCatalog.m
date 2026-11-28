@@ -32,6 +32,18 @@ static NSDictionary<NSString *, NSString *> *PDOutfitTitles(void) {
         @"sailor":    @"JK 水手服",
         @"jk-sailor": @"JK 水手服",
         @"default":   @"默认",
+        // build.96：补齐 model.json 里的 11 个 id，避免设置页/菜单显示英文 id
+        @"miko":         @"巫女装",
+        @"dragon":       @"龙娘",
+        @"nurse":        @"护士装",
+        @"winter_deep":  @"深冬",
+        @"violet_winter":@"紫冬",
+        @"frost_dragon": @"霜龙",
+        @"formal":       @"礼服",
+        @"starsea":      @"星海",
+        @"eclipse":      @"蚀",
+        @"night_gala":   @"夜宴",
+        @"pale_nurse":   @"白护士",
     };
 }
 

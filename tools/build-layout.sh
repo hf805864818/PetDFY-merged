@@ -75,6 +75,15 @@ else
     echo "  未发现 build/prefs/PetDFYPrefs，沿用 vendor deb 里的二进制"
 fi
 
+# build.96：vendor Root.plist 的 Outfit 只有 4 项（maid/cape/crew/sailor）。
+# 用源码树里的 15 项版本覆盖；缺文件时保持原样，不影响出包。
+if [ -f prefs-src/Root.plist ]; then
+    cp -f prefs-src/Root.plist "$PREFS_BUNDLE/Root.plist"
+    echo "  Root.plist -> 15 outfits"
+else
+    echo "  WARN prefs-src/Root.plist 缺失，设置页仍是 4 套"
+fi
+
 echo "== 4. 放语音 helper =="
 if [ -f "$VOICE_BIN" ]; then
     VOICE_DIR="layout/Library/Application Support/PetDFY"

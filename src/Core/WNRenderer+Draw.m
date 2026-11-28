@@ -22,6 +22,7 @@
 //
 
 #import "WNRenderer.h"
+#import "PDBoot.h"
 #import <string.h>   // memset（Appearance 结构体清零）
 #import "WNLiveRig.h"
 #import "WNPainter.h"
@@ -91,6 +92,12 @@ static void PDDrawDiag(NSString *fmt, ...) {
         }
 
     if (!_device) { deviceSkips++; return; }
+    // build.96：管线没建起来时绝不进 draw 路径（空管线提交 = AGX 空指针崩溃）
+    if (_renderDisabled) {
+        static BOOL loggedDisabled = NO;
+        if (!loggedDisabled) { loggedDisabled = YES; PDDrawDiag(@"draw skip: renderDisabled=YES"); }
+        return;
+    }
 
     pool = objc_autoreleasePoolPush();
 
@@ -161,8 +168,14 @@ static void PDDrawDiag(NSString *fmt, ...) {
     }
     id drawable = [view currentDrawable];
     if (diagThisFrame) PDDrawDiag(@"B after currentDrawable: %@", drawable ? @"non-nil" : @"nil");
-    if (!drawable) drawableSkips++;
-    if (drawable) {
+    if (!drawable) {
+        // build.96：原实现这里漏了 signal，槽位永久归零 -> 之后每帧 slotSkip，画面冻结。
+        drawableSkips++;
+        if (slot) dispatch_semaphore_signal((dispatch_semaphore_t)slot);
+        objc_autoreleasePoolPop(pool);
+        return;
+    }
+    {
         NSInteger slotIndex = (NSInteger)(_frameIndex % 3);
         _frameIndex++;
 
@@ -205,6 +218,9 @@ static void PDDrawDiag(NSString *fmt, ...) {
             [cmd commit];
             // [build.059] 移除 waitUntilScheduled：GPU 队列异常时会永久阻塞主线程（看门狗卡死）。
             [self setDidSubmitFrame:YES];
+            // build.96：首帧真正提交才算启动健康，取代原来的「25 秒定时器」
+            static BOOL pdMarkedHealthy = NO;
+            if (!pdMarkedHealthy) { pdMarkedHealthy = YES; PDBootGuardMarkHealthy(); }
             submittedFrames++;
             if (diagThisFrame) PDDrawDiag(@"draw submitted");
         }
@@ -600,6 +616,23 @@ static void PDDrawDiag(NSString *fmt, ...) {
 }
 
 
+#pragma mark - 兜底纹理
+
+/// 1x1 透明 BGRA 纹理。纹理缺失时用它占位，避免「跳过绑定 + 继续 draw」。
+- (id<MTLTexture>)pd_transparentTexture {
+    static id<MTLTexture> tex;
+    if (tex) return tex;
+    if (!_device) return nil;
+    MTLTextureDescriptor *d =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                           width:1 height:1 mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead;
+    tex = [_device newTextureWithDescriptor:d];
+    uint32_t px = 0;
+    [tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&px bytesPerRow:4];
+    return tex;
+}
+
 #pragma mark - 单网格绘制（真实 ABI：look 按指针传 80 字节）
 
 /// 逐条还原（imp 0x57db0，91 条指令）。调用序列完全按二进制顺序。
@@ -619,21 +652,34 @@ static void PDDrawDiag(NSString *fmt, ...) {
         (NSUInteger)m.positionOffset >= [(id<MTLBuffer>)positions length]) return;
 
     // 1) 管线：multiply 决定乘算还是普通（0x57e18/0x57e24/0x57e34）
-    id<MTLRenderPipelineState> pipe = m.multiply ? _multiplyPipeline : _normalPipeline;
-    if (pipe) [encoder setRenderPipelineState:pipe];        // 0x57e48
+    //    build.96：pipe 为 nil 时绝不能「跳过设置继续画」，必须整件早退。
+    id<MTLRenderPipelineState> pipe = m.multiply
+        ? (_multiplyPipeline ?: _normalPipeline)
+        : _normalPipeline;
+    if (!pipe) {
+        static int pipeSkips = 0;
+        if (pipeSkips++ < 5) PDDrawDiag(@"skip mesh: pipeline nil (multiply=%d)", m.multiply);
+        return;
+    }
+    [encoder setRenderPipelineState:pipe];                  // 0x57e48
 
     // 2) 顶点缓冲 0：共享 positions + positionOffset（0x57e54/0x57e68）
-    if (positions) {
-        [encoder setVertexBuffer:positions offset:(NSUInteger)m.positionOffset atIndex:0];
+    [encoder setVertexBuffer:positions offset:(NSUInteger)m.positionOffset atIndex:0];
+    // 3) 顶点缓冲 1：uv（0x57e90）—— 缺失时整件跳过，不能留空槽
+    if (!m.uv || m.uv.length < 8) {
+        static int uvSkips = 0;
+        if (uvSkips++ < 5) PDDrawDiag(@"skip mesh: uv nil/short len=%lu",
+                                       (unsigned long)m.uv.length);
+        return;
     }
-    // 3) 顶点缓冲 1：uv（0x57e90）
-    if (m.uv) [encoder setVertexBuffer:m.uv offset:0 atIndex:1];
+    [encoder setVertexBuffer:m.uv offset:0 atIndex:1];
 
     // 4) 片元 uniform：Appearance 80 字节（0x57ea8）
     [encoder setFragmentBytes:look length:sizeof(WNLook) atIndex:0];
 
-    // 5) 纹理（0x57eb8）
-    if (tex) [encoder setFragmentTexture:tex atIndex:0];
+    // 5) 纹理（0x57eb8）—— 用 1x1 透明纹理占位，保证槽位永远有有效对象
+    id<MTLTexture> useTex = tex ?: [self pd_transparentTexture];
+    if (useTex) [encoder setFragmentTexture:useTex atIndex:0];
 
     // 6) 索引绘制：MTLPrimitiveTypeTriangle(3) / UInt16 / offset 0（0x57ef8）
     /*
@@ -641,11 +687,19 @@ static void PDDrawDiag(NSString *fmt, ...) {
      * 素材切换 / 变形器重建期间 positions 可能比网格短，此时 setVertexBuffer:offset:
      * 会把索引指到 buffer 外面，draw 时 GPU 读越界 -> SIGSEGV（崩 SpringBoard）。
      */
-    if (positions) {
+    {
         NSUInteger posLen = (NSUInteger)[(id<MTLBuffer>)positions length];
-        if ((NSUInteger)m.positionOffset >= posLen) {
-            NSLog(@"[PetDFY] skip draw: positionOffset %lu >= positions %lu",
-                  (unsigned long)m.positionOffset, (unsigned long)posLen);
+        // build.96：只校验起点不够。索引最大到 maxIndex，顶点按 8 字节/个，
+        // 必须保证 positionOffset + (maxIndex+1)*8 <= posLen，否则 GPU 越界读。
+        NSUInteger needEnd = (NSUInteger)m.positionOffset
+                           + ((NSUInteger)m.maxIndex + 1) * 8;
+        if (m.vertexCount == 0 || needEnd > posLen) {
+            static int rangeSkips = 0;
+            if (rangeSkips++ < 5) {
+                PDDrawDiag(@"skip mesh: needEnd=%lu > posLen=%lu (offset=%llu vtx=%llu)",
+                           (unsigned long)needEnd, (unsigned long)posLen,
+                           m.positionOffset, m.vertexCount);
+            }
             return;
         }
     }
@@ -939,6 +993,15 @@ static void PDDrawDiag(NSString *fmt, ...) {
         WNMesh *m = [WNMesh new];
         m.positionOffset = positionOffset;                            // 0x57564
         m.indexCount     = idxData.length / 2;                        // 0x57570 lsr #1
+        // build.96：绘制前必须知道本网格的顶点区间。uint16 索引最多 65535 个顶点，
+        // 超出会静默回绕 -> 索引指向错误顶点（画面碎裂）。这里直接跳过并留日志。
+        m.vertexCount    = (unsigned long long)(cols + 1) * (rows + 1);
+        if (m.vertexCount == 0 || m.vertexCount > 65535ull) {
+            NSLog(@"[PetDFY] skip part: vertexCount=%llu (grid=%lux%lu, uint16)",
+                  m.vertexCount, (unsigned long)cols, (unsigned long)rows);
+            continue;
+        }
+        m.maxIndex       = (unsigned int)(m.vertexCount - 1);
         m.uv      = [_device newBufferWithBytes:uvData.bytes
                                          length:uvData.length
                                         options:0];                   // 0x575bc

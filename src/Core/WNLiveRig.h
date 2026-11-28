@@ -95,6 +95,8 @@ typedef struct WNBallAnchor {
 - (double)spring:(id)arg1 target:(double)arg2 dt:(double)arg3;
 - (WNSpring *)newSpring:(NSString *)arg1 k:(double)arg2 c:(double)arg3 limit:(double)arg4;
 - (id)initWithResourceURL:(id)arg1 scheme:(id)arg2 seed:(unsigned int)arg3 freeGround:(BOOL)arg4;
+/// build.96：显式传入 outfit，避免模型永远按 maid 装配
+- (id)initWithResourceURL:(id)arg1 scheme:(id)arg2 outfit:(id)arg3 seed:(unsigned int)arg4 freeGround:(BOOL)arg5;
 - (void)step:(double)arg1;
 - (void)step:(double)arg1 buildMesh:(BOOL)arg2;
 - (void)rotation:(id)arg1 a:(double)arg2;

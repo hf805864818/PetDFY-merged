@@ -11,6 +11,8 @@
     BOOL _multiply;
     unsigned long long _positionOffset;
     unsigned long long _indexCount;
+    unsigned long long _vertexCount;
+    unsigned int       _maxIndex;
     id<MTLBuffer> _uv;
     id<MTLBuffer> _indices;
     NSString * _texture;
@@ -19,6 +21,10 @@
 
 @property (nonatomic) unsigned long long positionOffset;
 @property (nonatomic) unsigned long long indexCount;
+/// 本网格顶点数（(cols+1)*(rows+1)），用于绘制前做 buffer 区间校验
+@property (nonatomic) unsigned long long vertexCount;
+/// 本网格索引最大值（= vertexCount-1），uint16 上限 65535
+@property (nonatomic) unsigned int maxIndex;
 @property (nonatomic, strong) id<MTLBuffer> uv;
 @property (nonatomic, strong) id<MTLBuffer> indices;
 @property (nonatomic, copy) NSString * texture;

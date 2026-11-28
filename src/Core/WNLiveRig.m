@@ -88,6 +88,17 @@ static double WNPoseValue(id container, NSString *key, double dflt) {
                              scheme:(NSString *)scheme
                                seed:(uint32_t)seed
                          freeGround:(BOOL)free {
+    return [self initWithResourceURL:url scheme:scheme outfit:@"maid"
+                                seed:seed freeGround:free];
+}
+
+/// build.96：outfit 参与模型选择。原实现写死 _outfit = @"maid"，
+/// applyAppearance 之后才改 ivar，模型与网格已经按 maid 装配完。
+- (instancetype)initWithResourceURL:(NSURL *)url
+                             scheme:(NSString *)scheme
+                             outfit:(NSString *)outfit
+                               seed:(uint32_t)seed
+                         freeGround:(BOOL)free {
     self = [super init];
     if (!self) return nil;
 
@@ -101,7 +112,7 @@ static double WNPoseValue(id container, NSString *key, double dflt) {
 
     _resourceURL = [url copy];   // 【扩展】供素材定位使用
     _scheme = [scheme copy] ?: @"deepseek";
-    _outfit = @"maid";
+    _outfit = ([outfit isKindOfClass:[NSString class]] && outfit.length) ? [outfit copy] : @"maid";
     _highlight = @(1.0);
     _toyBall = @(0.0);
 
