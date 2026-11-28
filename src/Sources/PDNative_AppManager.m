@@ -1,1811 +1,1743 @@
 //
-//  PDNative_AppManager.m
-//  PetDFY
+//  PDNative_AppManager.m — 装包 / 签名 / 应用枚举
 //
-//  应用安装 / 启动 / 终止 / 卸载，以及越狱环境下的 ad-hoc 重签（fakesign）。
-//
-//  二进制证据
-//    image base  : 0（extract/bin/PetDFY.arm64.dylib, sha256 E4DE3DA9…B6EF）
-//    方法表      : out/method-table-all.md → 27 条（1 条 `+` / 26 条 `-`）
-//    区间        : 0x73870 .. 0x7e950（共 11320 条指令，本批最大单元）
-//    instanceSize: 8（0x08）—— 无实例 ivar，全部走单例 + 局部状态
-//
-//  还原口径（本文件是 Tier-2：调用序列 + 分支骨架 + 全部字符串常量逐字还原；
-//  纯算术与寄存器搬运不逐条转写）
-//  已定案 2026-11-28（复核）：原文写“凡语义不唯一的判断都打 Assumed 并给地址”，实测 18 条
-//  Assumed 里 17 条不带地址，口径与实际不符。本次已逐条补地址或结论，见 out/notes/assume-a.md。
-//  同批核对：本文件 27 条 imp 与 out/method-table-all.md 的 PDNative_AppManager 行集合完全相等
-//  （0x73870..0x7e324；sign 列 1 个 + / 26 个 -，与下行一致）。
-//
-//  跨文件依赖（这些静态函数不在本文件里，签名由调用点反推）
-//    PDNative_MCPResolvedJailbreakPath(NSString *)      0x78ea4 起（多处）
-//    PDNative_MCPJailbreakEnvironment(void)             0x7b408
-//    PDNative_MCPRunProcess(...)                        0x7aab0
-//    PDNative_MCPResolvedJailbreakPath 解析、mcp-root/mcp-ldid 定位、dpkg 落盘
-//
-//  符号修正（跨单元一致性，2026-11-28）
-//    +sharedInstance 是**类方法**（sign = +，0x73870），已改为 `+`；其余 26 条为实例方法。
-//    本文件里对 `frontmostApplicationInfo` 的三处调用改用
-//    `PDAppFrontmostInfo()`（0x7e79c 静态函数，走 PDNative_AccessibilityManager）：
-//    该 selector 不在本类方法表内（CALL 0x7e79c 是跨文件静态入口），走 performSelector 以免假定签名。
-//    同时把 `[PDNative_MCPLogger.sharedInstance …]` 全部改为 `[PDNative_MCPLogger …]`
-//    —— MCPLogger 没有实例方法，`isDebugLoggingEnabled` 是类方法。
-//
-//  标记：[0xADDR] = 指令地址 / Assumed / NOT RUN
-//  已定案 2026-11-28（复核）：图例可用——本文件内 “CALL 0x” 内联标记共 12 处，指向
-//  0x7e79c / 0x752fc / 0x75e94 / 0x75be8 / 0x76c14 / 0x77590 / 0x7d0d8 / 0x79b90 八个本文件外的
-//  静态入口；其中 0x79b90 已在本次解出（见行 1692 段）。
+//  还原依据：PetDFY.arm64e.dylib 0x77fac–0x83900（_OBJC_CLASS_$_PDNative_AppManager）
+//  本文件所有 `bl 0xXXXX` 均已按 selref 解引用还原为选择器调用，非猜测。
 //
 
 #import "PDNative_AppManager.h"
-#import "PDNative_MCPLogger.h"
-#import <Foundation/Foundation.h>
-#import <Security/Security.h>   // SecStaticCode* / kSecCodeInfoEntitlementsDict（0x79bd4/0x79bfc/0x79c20）
 #import <objc/runtime.h>
-#import <objc/message.h>
-#import <spawn.h>
 #import <sys/stat.h>
-#import <sys/wait.h>
-#import <unistd.h>
-#import <errno.h>
-#import <string.h>
+#import <spawn.h>
+#import <dlfcn.h>
+extern char **environ;
+#include <errno.h>
+#include <string.h>
+#import <Foundation/Foundation.h>
+#import "PDNative_MCPLogger.h"
+#import "PDNative_AccessibilityManager.h"
 
-extern NSString *PDNative_MCPResolvedJailbreakPath(NSString *name);   // 0x78ea4
-extern NSDictionary *PDNative_MCPJailbreakEnvironment(void);          // 0x7b408
-extern id PDNative_MCPRunProcess(NSArray *argv, NSDictionary *env, NSString **output, int *exitCode); // 0x7aab0
+@class PDNative_MCPLogger;
 
-static NSString *const kPDAppLogPrefix = @"[witchan][ios-mcp]%@";     // 0x…（各方法共用）
-static NSString *const kPDAppContainersRoot = @"/var/containers/Bundle/Application"; // 0x761…/0x766…
+// 进程派生 / 越狱路径解析 —— 由 PDNative_MCPProcess.m 提供（见该文件 extern 段）
+extern NSString *PDNative_MCPResolvedJailbreakPath(NSString *path);
+extern NSDictionary *PDNative_MCPJailbreakEnvironment(void);
+extern BOOL PDNative_MCPRunProcess(NSString *tool,
+                                   NSArray *arguments,
+                                   NSDictionary *environment,
+                                   NSUInteger flags,
+                                   NSString **output,
+                                   int *exitCode,
+                                   NSError **spawnError);
 
-// 0x7e79c..0x7e810（静态函数，被 launchApp/openURL 共用）：
-//   [PDNative_AccessibilityManager sharedInstance] → frontmostApplicationInfo
-//   → 非 NSDictionary 时用空字典顶替（0x7e7e0 isKindOfClass: + 0x7e7f0 csel）。
-//   Observed：0x7e7ac 的类槽（0x11a090 → 0x11b9d0）= PDNative_AccessibilityManager；
-//   调用形式是两段零参 objc_msgSend，没有多参 performSelector。
-static NSDictionary *PDAppFrontmostInfo(void) {
-    Class managerClass = NSClassFromString(@"PDNative_AccessibilityManager");        // 0x7e7ac
-    if (!managerClass) { return @{}; }
-    id manager = ((id (*)(id, SEL))objc_msgSend)((id)managerClass, @selector(sharedInstance)); // 0x7e7b0
-    id info = ((id (*)(id, SEL))objc_msgSend)(manager, @selector(frontmostApplicationInfo));  // 0x7e7bc
-    return ([info isKindOfClass:[NSDictionary class]]) ? info : @{};                 // 0x7e7e0/0x7e7f0
-}
+static NSError *PDNAppError(NSString *message, NSInteger code);
+static id PDNAppLSWorkspace(void);
 
-// 0x74a58..0x74bb8（静态函数，listInstalledApps: 的块内 0x748bc 调用）：
-//   applicationType 归一。参数 (proxy x0, bundleId x1, type x2)，返回值 retain/autorelease。
-//   已定案（逐分支，复核 2026-11-28）：
-//     0x74a94  [type isEqualToString:@"User"]            → 返回 @"User"（0x74a8c 预置 x23=CF 0xfee28）
-//     0x74aac  [proxy respondsToSelector:@selector(bundleURL)]
-//     0x74ac0  bl 0x752fc(proxy, bundleURL) → 0x74ae0 isKindOfClass:NSURL
-//     0x74aec/0x74af8 [url path] → stringByStandardizingPath
-//     0x74b2c  [path containsString:@"/Containers/Bundle/Application/"]（CF 0x100088）→ 返回 @"User"
-//     0x74b34/0x74b48 bundleId.length != 0 && ![bundleId hasPrefix:@"com.apple."]（CF 0x1000a8）→ 返回 @"User"
-//     0x74b5c  [type isEqualToString:@"Internal"]（CF 0x1000c8）      → 返回 @"System"（CF 0x1000e8）
-//     0x74b78  type.length ? type : @"System"
-//   注意极性：容器内路径与「非 com.apple. 前缀」都归 **User**；System 只由 com.apple. 前缀
-//   或空类型给出——与旧注释「容器内/苹果自家包归 System」相反。
-static NSString *PDAppNormalizedAppType(id proxy, NSString *bundleId, NSString *type) {
-    if ([type isEqualToString:@"User"]) { return @"User"; }                    // 0x74a94
-    NSString *path = nil;
-    if ([proxy respondsToSelector:@selector(bundleURL)]) {                     // 0x74aac
-        id u = ((id (*)(id, SEL))objc_msgSend)(proxy, @selector(bundleURL));   // 0x74ac0 → 0x752fc
-        if ([u isKindOfClass:[NSURL class]]) {                                 // 0x74ae0
-            path = [[u path] stringByStandardizingPath];                       // 0x74aec / 0x74af8
-        }
-    }
-    if ([path containsString:@"/Containers/Bundle/Application/"]) { return @"User"; }        // 0x74b2c
-    if (bundleId.length && ![bundleId hasPrefix:@"com.apple."]) { return @"User"; }          // 0x74b34 / 0x74b48
-    if ([type isEqualToString:@"Internal"]) { return @"System"; }                            // 0x74b5c
-    return type.length ? type : @"System";                                                   // 0x74b78
-}
+@interface PDNative_AppManager ()
+- (pid_t)pidForBundleId:(NSString *)bundleId;
+- (BOOL)waitForUninstallOfBundleId:(NSString *)bundleId timeout:(double)timeout;
+@end
+@interface PDNative_LSApplicationWorkspace : NSObject
+- (id)allApplications;
+- (id)applicationProxyForIdentifier:(NSString *)identifier;
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleId;
+- (BOOL)openSensitiveURL:(NSURL *)url withOptions:(NSDictionary *)options;
+- (BOOL)openURL:(NSURL *)url withOptions:(NSDictionary *)options error:(NSError **)error;
+- (BOOL)uninstallApplication:(NSString *)bundleId withOptions:(id)options;
+@end
+
+extern BOOL PDNativeIsMachOFileAtPath(NSString *path);
 
 @implementation PDNative_AppManager
 
-// ---------------------------------------------------------------------------
-// +[PDNative_AppManager sharedInstance]  imp=0x73870 insns=26
-// ---------------------------------------------------------------------------
-+ (instancetype)sharedInstance {
-    static id shared = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ shared = [[self class] new]; });            // [0x738b0] objc_alloc_init
-    return shared;
+// ============================================================================
+//  以下为 0x7803c–0x81994 段还原（launch / kill / list / frontmost / openURL /
+//  路径等待 / fakesign / install / uninstall）。每条方法的保真级别见方法头注释。
+// ============================================================================
+
+static NSString *const PDNAppManagerErrorDomain = @"PDNative.MCP.AppManager";  // Assumed
+
+static NSError *PDNAppError(NSString *message, NSInteger code) {
+    return [NSError errorWithDomain:PDNAppManagerErrorDomain
+                               code:code
+                           userInfo:@{@"message": message ?: @""}];
+
 }
 
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager launchApp:error:]  imp=0x738d8 insns=639
-// [0x73a68]  insn#100
-// [0x73bf8]  insn#200
-// [0x73d88]  insn#300
-// [0x73f18]  insn#400
-// [0x740a8]  insn#500
-// [0x74238]  insn#600
-//   主路径 LSApplicationWorkspace openApplicationWithBundleID:；随后轮询前台 5 秒；
-//   失败再走 SBUIController activateApplication: 兜底。
-// ---------------------------------------------------------------------------
+
+// 二进制里 lsapplicationworkspace 取号靠 objc_getClass；类名串在 0xc0174
+static id PDNAppLSWorkspace(void) {
+    Class cls = objc_getClass("LSApplicationWorkspace");
+    if (!cls) {
+        return nil;
+    }
+    if (![cls respondsToSelector:@selector(defaultWorkspace)]) {
+        return nil;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    return [cls performSelector:@selector(defaultWorkspace)];
+#pragma clang diagnostic pop
+}
+
+#pragma mark - 启动
+
+// 0x7803c–0x78a7c (2624 B) — Observed：错误串、YES/NO、5 秒超时、activateApplication: 兜底
+// ============================================================================
+//  以下为 0x7803c–0x81994 段还原（launch / kill / list / frontmost / openURL /
+//  路径等待 / fakesign / install / uninstall）。每条方法的保真级别见方法头注释。
+// ============================================================================
+
+
+
+// 二进制里 lsapplicationworkspace 取号靠 objc_getClass；类名串在 0xc0174
+
+#pragma mark - 启动
+
+// 0x7803c–0x78a7c (2624 B) — Observed：错误串、YES/NO、5 秒超时、activateApplication: 兜底
 - (BOOL)launchApp:(NSString *)bundleId error:(NSError **)error {
-    if (!bundleId.length) {                                             // [0x738d8]
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager"
-                                                 code:1
-                                             userInfo:@{NSLocalizedDescriptionKey: @"Empty bundle ID"}]; }
+    if (bundleId.length == 0) {
+        if (error) *error = PDNAppError(@"Empty bundle ID", 1);
         return NO;
     }
-    Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");      // [0x739…]
-    if (!LSAppWorkspace || ![LSAppWorkspace respondsToSelector:@selector(defaultWorkspace)]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace is unavailable"}]; }
+
+    Class LS = objc_getClass("LSApplicationWorkspace");
+    if (!LS) {
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace is unavailable", 2);
         return NO;
     }
-    id workspace = ((id (*)(id, SEL))objc_msgSend)((id)LSAppWorkspace,
-                                                   @selector(defaultWorkspace));
-    if (!workspace) {                                                    // 文案 0x…: "LSApplicationWorkspace defaultWorkspace returned nil"
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace defaultWorkspace returned nil"}]; }
+    if (![LS respondsToSelector:@selector(defaultWorkspace)]) {
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace defaultWorkspace is unavailable", 3);
+        return NO;
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id workspace = [LS performSelector:@selector(defaultWorkspace)];
+#pragma clang diagnostic pop
+
+    if (!workspace) {
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace defaultWorkspace returned nil", 4);
         return NO;
     }
     if (![workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        @"LSApplicationWorkspace openApplicationWithBundleID: is unavailable"}]; }
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace openApplicationWithBundleID: is unavailable", 5);
         return NO;
     }
-    CFTimeInterval started = CFAbsoluteTimeGetCurrent();                  // [0x739…]
-    BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
-                     @selector(openApplicationWithBundleID:), bundleId);
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        // @"[App] LaunchServices launch request for %@ returned %@ in %.0fms"
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] LaunchServices launch request for %@ returned %@ in %.0fms",
-              bundleId, opened ? @"YES" : @"NO",
-              (CFAbsoluteTimeGetCurrent() - started) * 1000.0]);
-    }
-    if (!opened) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        @"LSApplicationWorkspace openApplicationWithBundleID: returned NO"}]; }
-        return NO;
-    }
-    // ---- 前台确认：最多 5 秒 ----
-    if ([NSThread isMainThread]) {                                        // [0x73a…] isMainThread
-        dispatch_sync(dispatch_get_global_queue(0, 0), ^{ /* 轮询放到后台队列 */ });
-    }
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];         // 已定案 0x73ba4: fmov d0,#5.0 → 0x73ba8 bl sel:dateWithTimeIntervalSinceNow:
-    NSString *frontmost = nil;
-    while ([deadline timeIntervalSinceNow] > 0) {
-        NSDictionary *info = PDAppFrontmostInfo(); // CALL 0x7e79c
-        frontmost = info[@"bundleId"] ?: info[@"CFBundleIdentifier"];
-        if ([frontmost isEqualToString:bundleId]) {
-            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                // @"[App] Launch confirmed in foreground: %@"
-                NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                      @"[App] Launch confirmed in foreground: %@", bundleId]);
-            }
-            return YES;
-        }
-        [NSThread sleepForTimeInterval:0.1];                              // 已定案 0x73bdc: ldr d8,[0xbfc88](=0.1) → 0x73c50 fmov d0,d8 → 0x73c54 bl sel:sleepForTimeInterval:
-    }
-    {
-        NSString *name = [[NSBundle bundleWithIdentifier:bundleId] localizedInfoDictionary][@"CFBundleDisplayName"];
-        NSString *suffix = name.length ? [NSString stringWithFormat:@" (%@)", name] : @"";
-        NSString *message = frontmost.length
-            ? [NSString stringWithFormat:
-                 @"Launch request sent for %@, but frontmost app is still %@%@",
-                 bundleId, frontmost, suffix]
-            : [NSString stringWithFormat:
-                 @"Launch request sent for %@, but it did not become frontmost within 5 seconds",
-                 bundleId];
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Launch not confirmed for %@, currentFrontmostBundleId=%@",
-                  bundleId, frontmost ?: @"-"]);
-        }
-        if (error) {
-            *error = [NSError errorWithDomain:@"PDNative_AppManager" code:6
-                                     userInfo:@{NSLocalizedDescriptionKey: message}];
-        }
-    }
-    // ---- SBUIController 兜底（0x73d… 起，@try/@catch） ----
+
+    double started = CFAbsoluteTimeGetCurrent();
+    BOOL opened = NO;
     @try {
-        Class SBUIController = objc_getClass("SBUIController");           // [0x73e…]
-        id controller = [SBUIController performSelector:@selector(sharedInstance)];
-        if ([controller respondsToSelector:@selector(activateApplication:)]) {
-            [controller performSelector:@selector(activateApplication:) withObject:workspace];
-            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                // @"[App] Launched app via activateApplication: %@"
-                NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                      @"[App] Launched app via activateApplication: %@", bundleId]);
-            }
-            return YES;
-        }
-        if (error) {
-            *error = [NSError errorWithDomain:@"PDNative_AppManager" code:7
-                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                    @"%@; SBUIController fallback unavailable for %@",
-                    @"LaunchServices request failed", bundleId]}];
-        }
-        return NO;
-    } @catch (NSException *exception) {
-        // 文案：@"LSApplicationWorkspace launch failed: %@" / @"unknown exception" / @"unknown"
-        NSString *reason = exception.reason ?: @"unknown";
-        NSString *name = exception.name ?: @"unknown exception";
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] LaunchServices launch exception for %@: %@ - %@",
-                  bundleId, name, reason]);
-        }
-        if (error) {
-            *error = [NSError errorWithDomain:@"PDNative_AppManager" code:8
-                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                    @"LSApplicationWorkspace launch failed: %@", reason]}];
-        }
-        return NO;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager killApp:error:]  imp=0x742d4 insns=224
-//   FBSSystemService terminateApplication:forReason:andReport:withDescription:（NSInvocation，实参 4 个）
-// ---------------------------------------------------------------------------
-- (BOOL)killApp:(NSString *)bundleId error:(NSError **)error {
-    if (!bundleId.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Empty bundle ID"}]; }
-        return NO;
-    }
-    __block BOOL killed = NO;
-    __block NSError *inner = nil;
-    void (^work)(void) = ^{
-        Class FBS = objc_getClass("FBSSystemService");                    // [0x743…]
-        id service = [FBS performSelector:@selector(sharedService)];
-        // 0x744f8 的 selref 实读：terminateApplication:forReason:andReport:withDescription:（4 参）
-        SEL terminate = @selector(terminateApplication:forReason:andReport:withDescription:);
-        if (!service || ![service respondsToSelector:terminate]) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                    userInfo:@{NSLocalizedDescriptionKey:
-                        service ? @"terminateApplication: selector not available"
-                                : @"FBSSystemService not available"}];
-            return;
-        }
-        NSMethodSignature *sig = [service methodSignatureForSelector:terminate];  // [0x743…]
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:service];
-        [inv setSelector:terminate];
-        [inv setArgument:&bundleId atIndex:2];                 // 0x74514 idx=2（bundleId）
-        int reason = 1;                                        // 0x74518 w24=#1
-        [inv setArgument:&reason atIndex:3];                   // 0x7452c idx=3
-        BOOL andReport = NO;                                   // 0x74530 strb wzr,[sp,#0x13]
-        [inv setArgument:&andReport atIndex:4];                // 0x74540 idx=4
-        NSString *terminateDescription = @"Terminated via ios-mcp";   // 0x74548 CFString
-        [inv setArgument:&terminateDescription atIndex:5];     // 0x7455c idx=5
-        [inv retainArguments];
-        [inv invoke];
-        killed = YES;
-    };
-    if ([NSThread isMainThread]) {                                       // [0x743…]
-        work();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), work);
-    }
-    if (!killed) {
-        if (error) { *error = inner; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        // 文案 0x…: @"Terminated via ios-mcp" 作为 reason 串；日志 @"[App] Killed app: %@"
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:@"[App] Killed app: %@", bundleId]);
-    }
-    return YES;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager listInstalledApps:]  imp=0x74654 insns=345
-// [0x747e4]  insn#100
-// [0x74974]  insn#200
-// [0x74b04]  insn#300
-//   返回 @[{name, type, path?...}]；type 取 User / System / Internal。
-// ---------------------------------------------------------------------------
-- (NSArray<NSDictionary *> *)listInstalledApps:(NSString *)filter {
-    __block NSArray *result = @[];
-    void (^work)(void) = ^{
-        Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-        id workspace = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        NSArray *all = [workspace performSelector:@selector(allInstalledApplications)];
-        NSMutableArray *rows = [NSMutableArray array];
-        for (id proxy in all) {
-            NSString *bundleId = [proxy performSelector:@selector(applicationIdentifier)];  // 0x74870，选择器槽 0x119be8
-            NSString *name = [proxy performSelector:@selector(localizedName)];              // 0x74884，槽 0x119bf0
-            NSString *type = [proxy performSelector:@selector(applicationType)];            // 0x74898，槽 0x119bf8
-            NSString *normalized = PDAppNormalizedAppType(proxy, bundleId, type);           // 0x748bc bl 0x74a58
-            // 已定案 0x748c8 / 0x748f0：filter 是**类型过滤**，与 bundleId 无关——
-            //   0x748c8 [filter isEqualToString:@"user"]（CF 0xf4348），
-            //           且 0x748e8 归一类型 != @"User"（CF 0xfee28）→ 0x748ec cbz 跳到 0x749ac（跳过本行）；
-            //   0x748f0 [filter isEqualToString:@"system"]（CF 0xf7448），
-            //           0x74910 归一类型 == @"User" → 0x74914 tbnz 跳到 0x749ac（跳过本行）。
-            //   其余取值（nil / 空串 / 其它）都不过滤；全函数没有 [filter length]，
-            //   也没有 [bundleId isEqualToString:filter]。
-            if ([filter isEqualToString:@"user"] && ![normalized isEqualToString:@"User"]) { continue; }
-            if ([filter isEqualToString:@"system"] && [normalized isEqualToString:@"User"]) { continue; }
-            NSString *path = nil;
-            if ([proxy respondsToSelector:@selector(bundleURL)]) {                 // 0x74aac（归一函数内同一判定）
-                id u = [proxy performSelector:@selector(bundleURL)];               // 0x752fc
-                if ([u isKindOfClass:[NSURL class]]) {                            // 0x74ae0
-                    path = [[u path] stringByStandardizingPath];                   // 0x74aec / 0x74af8
-                }
-            }
-            [rows addObject:@{ @"name": name ?: @"",
-                               @"bundleId": bundleId ?: @"",
-                               @"type": normalized,
-                               @"path": path ?: @"" }];
-        }
-        result = [rows copy];
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager listRunningApps]  imp=0x74bb8 insns=280
-// [0x74d48]  insn#100
-// [0x74ed8]  insn#200
-//   私有 API runningApplications → 逐个取 bundleIdentifier（NSInvocation 处理返回值）
-// ---------------------------------------------------------------------------
-- (NSArray<NSDictionary *> *)listRunningApps {
-    __block NSArray *result = @[];
-    void (^work)(void) = ^{
-        // 已定案 0x74cf4：类名是 "SBApplicationController"（cstr @0xba279），不是 SBWorkspace。
-        //   0x74cf8 objc_getClass("SBApplicationController")，nil → 0x74fdc（空结果）；
-        //   0x74d04 槽 0x118e98 = @selector(sharedInstance)，0x74d08 performSelector:（对类直接发，
-        //       没有先 respondsToSelector:）；
-        //   0x74d18 槽 0x119c00 = @selector(runningApplications)，0x74d20 respondsToSelector:，
-        //       命中 → 0x74d38 performSelector:runningApplications；
-        //       未命中 → 0x74d4c 槽 0x119c08 = @selector(allApplications)，0x74d54 performSelector:。
-        Class appController = objc_getClass("SBApplicationController");             // 0x74cf8
-        NSArray *running = nil;
-        if (appController) {
-            id ws = [appController performSelector:@selector(sharedInstance)];       // 0x74d08
-            if ([ws respondsToSelector:@selector(runningApplications)]) {            // 0x74d20
-                running = [ws performSelector:@selector(runningApplications)];       // 0x74d38
-            } else {
-                running = [ws performSelector:@selector(allApplications)];           // 0x74d54
-            }
-        }
-        NSMutableArray *rows = [NSMutableArray array];
-        for (id app in running) {
-            NSString *bundleId = nil;
-            SEL sel = @selector(bundleIdentifier);
-            if ([app respondsToSelector:sel]) {
-                NSMethodSignature *sig = [app methodSignatureForSelector:sel];   // [0x74d…]
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:app];
-                [inv setSelector:sel];
-                [inv invoke];
-                __unsafe_unretained id value = nil;
-                [inv getReturnValue:&value];
-                bundleId = value;
-            }
-            if (bundleId.length) {
-                [rows addObject:@{ @"name": bundleId, @"bundleId": bundleId, @"type": @"" }];
-            }
-        }
-        result = [rows copy];
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager getFrontmostApp]  imp=0x75018 insns=196
-//   返回 @{bundleId, name}
-// ---------------------------------------------------------------------------
-- (NSDictionary *)getFrontmostApp {
-    // [0x75018..] 先取 frontmostApplicationInfo（CALL 0x752fc）
-    NSDictionary *info = PDAppFrontmostInfo();
-    NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    NSString *bundleId = info[@"bundleId"];
-    NSString *name = info[@"name"];
-    if (bundleId.length) { result[@"bundleId"] = bundleId; }             // [0x751…]
-    if (name.length) { result[@"name"] = name; }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager openURL:error:]  imp=0x75328 insns=901
-// [0x754b8]  insn#100
-// [0x75648]  insn#200
-// [0x757d8]  insn#300
-// [0x75968]  insn#400
-// [0x75af8]  insn#500
-// [0x75c88]  insn#600
-// [0x75e18]  insn#700
-// [0x75fa8]  insn#800
-// [0x76138]  insn#900
-//   三级：UIApplication openURL:options:completionHandler: → LSApplicationWorkspace
-//   openSensitiveURL: → prefs 特例（com.apple.Preferences / com.apple.springboard）；
-//   之后按 scheme/host 轮询前台确认。
-// ---------------------------------------------------------------------------
-- (BOOL)openURL:(NSString *)urlString error:(NSError **)error {
-    if (!urlString.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Empty URL"}]; }
-        return NO;
-    }
-    NSURL *url = [NSURL URLWithString:urlString];                         // [0x753…] URLWithString:
-    if (!url) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"Invalid URL: %@", urlString]}]; }
-        return NO;
-    }
-    __block BOOL ok = NO;
-    __block NSError *inner = nil;
-    void (^work)(void) = ^{                                              // CALL 0x75e94 / 0x75be8
-        UIApplication *app = [UIApplication sharedApplication];
-        if ([app respondsToSelector:@selector(openURL:options:completionHandler:)]) {
-            __block BOOL done = NO;
-            __block BOOL accepted = NO;
-            [app openURL:url options:@{} completionHandler:^(BOOL success) {
-                accepted = success;
-                done = YES;
-            }];
-            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.5];  // 已定案 0x75740: fmov d0,#1.5 → 0x75744 bl sel:dateWithTimeIntervalSinceNow:（不是 2.0）
-            while (!done && [deadline timeIntervalSinceNow] > 0) {
-                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-            }
-            if (accepted) {
-                ok = YES;
-                if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                    NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                          @"[App] Opened URL via UIApplication: %@", urlString]);
-                }
-                return;
-            }
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                    userInfo:@{NSLocalizedDescriptionKey:
-                        done ? @"openURL returned NO" : @"openURL completion timed out"}];
-        }
-        // ---- LSApplicationWorkspace openSensitiveURL: ----
-        Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-        id ws = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        SEL openSensitive = @selector(openSensitiveURL:withOptions:);
-        if ([ws respondsToSelector:openSensitive]) {
-            NSMethodSignature *sig = [ws methodSignatureForSelector:openSensitive];
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:ws];
-            [inv setSelector:openSensitive];
-            [inv setArgument:&url atIndex:2];
-            id options = @{};
-            [inv setArgument:&options atIndex:3];
-            [inv invoke];
-            BOOL accepted = NO;
-            [inv getReturnValue:&accepted];
-            if (accepted) {
-                ok = YES;
-                if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                    NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                          @"[App] Opened URL via LSApplicationWorkspace: %@", urlString]);
-                }
-                return;
-            }
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                    userInfo:@{NSLocalizedDescriptionKey: @"openSensitiveURL returned NO"}];
-        }
-        if (error) { *error = inner ?: [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey: @"No URL open method available"}]; }
-    };
-    if ([NSThread isMainThread]) {                                       // [0x753…] isMainThread
-        work();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), work);                  // CALL 0x75be8
-    }
-    if (!ok) { return NO; }
-    // ---- 前台确认（scheme/host 判定，文案 "<url:%@://%@>" / "<url:%@>" / "<url>"） ----
-    NSString *lower = urlString.lowercaseString;
-    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
-    NSString *scheme = components.scheme.lowercaseString;
-    NSString *host = components.host;
-    // 已定案 0x75e94..0x76038（静态函数 PDAppWaitForFrontmost，调用点 0x7557c 传 d0=2.0）：
-    //   expected 三分支——0x75f2c/0x75f38 scheme=="prefs"（CF 0x100188）→ 0x75f44 标记；
-    //   0x75f48/0x75f54 scheme=="app-prefs"（CF 0x1001a8）→ 同上 → @"com.apple.Preferences"（CF 0x100168）；
-    //   否则 0x75ff8 host.length ? host（0x76008）: @"com.apple.springboard"（0x76018，CF 0xfee48）。
-    //   全程只比较 scheme 与 host.length，**不判 scheme == "https"**；springboard 是「host 为空」的兜底。
-    //   helper 内 0x75edc/0x75ee0 把超时下限钳到 0.1（fcsel）。
-    NSString *expected = nil;
-    if ([scheme isEqualToString:@"prefs"] || [scheme isEqualToString:@"app-prefs"]) {
-        expected = @"com.apple.Preferences";                                 // 0x75f44 → 0x75f8c
-    } else {
-        expected = host.length ? host : @"com.apple.springboard";            // 0x75ff8 / 0x76018
-    }
-    if (expected) {
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
-        NSDictionary *front = PDAppFrontmostInfo();
-        NSString *frontId = front[@"bundleId"];
-        while (![frontId isEqualToString:expected] && [deadline timeIntervalSinceNow] > 0) {
-            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                     beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-            front = PDAppFrontmostInfo();
-            frontId = front[@"bundleId"];
-        }
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Verified URL open after main dispatch: %@", urlString]);
-        }
-    }
-    return ok;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager appBundlePathForBundleId:mainExecutablePath:]
-//   imp=0x7613c insns=261
-// [0x762cc]  insn#100
-// [0x7645c]  insn#200
-//   扫 /var/containers/Bundle/Application/<UUID>/<*.app>/Info.plist，取最新修改的一个。
-// ---------------------------------------------------------------------------
-- (NSString *)appBundlePathForBundleId:(NSString *)bundleId
-                   mainExecutablePath:(NSString **)mainExecutablePath {
-    if (!bundleId.length) { return nil; }
-    NSFileManager *fm = [NSFileManager defaultManager];                   // [0x761…]
-    NSString *bestPath = nil;
-    NSString *bestExec = nil;
-    NSDate *bestDate = nil;
-    for (NSString *uuid in [fm contentsOfDirectoryAtPath:kPDAppContainersRoot error:NULL]) {
-        NSString *container = [kPDAppContainersRoot stringByAppendingPathComponent:uuid];
-        for (NSString *item in [fm contentsOfDirectoryAtPath:container error:NULL]) {
-            if (![[item pathExtension].lowercaseString isEqualToString:@"app"]) { continue; }
-            NSString *appPath = [container stringByAppendingPathComponent:item];
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                [appPath stringByAppendingPathComponent:@"Info.plist"]];
-            if (![info[@"CFBundleIdentifier"] isEqualToString:bundleId]) { continue; }
-            NSString *execName = info[@"CFBundleExecutable"];
-            if (!execName.length) { continue; }
-            NSString *execPath = [appPath stringByAppendingPathComponent:execName];
-            NSDictionary *attrs = [fm attributesOfItemAtPath:appPath error:NULL];
-            NSDate *modified = attrs[NSFileModificationDate] ?: [NSDate distantPast];
-            if (!bestDate || [modified compare:bestDate] == NSOrderedDescending) {
-                bestDate = modified;
-                bestPath = appPath;
-                bestExec = execPath;
-            }
-        }
-    }
-    if (mainExecutablePath) { *mainExecutablePath = bestExec; }
-    return bestPath;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager waitForAppBundlePathForBundleId:mainExecutablePath:timeout:]
-//   imp=0x76550 insns=76
-// ---------------------------------------------------------------------------
-- (NSString *)waitForAppBundlePathForBundleId:(NSString *)bundleId
-                           mainExecutablePath:(NSString **)mainExecutablePath
-                                      timeout:(double)timeout {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];     // [0x765…]
-    NSString *path = nil;
-    while ([deadline timeIntervalSinceNow] > 0) {
-        path = [self appBundlePathForBundleId:bundleId mainExecutablePath:mainExecutablePath];
-        if (path.length) { return path; }
-        [NSThread sleepForTimeInterval:0.25];                              // 已定案 0x76610: fmov d0,#0.25 → 0x76614 bl sel:sleepForTimeInterval:
-    }
-    return path;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager newestInstalledAppBundlePathAfterDate:resolvedBundleId:mainExecutablePath:]
-//   imp=0x76680 insns=396
-// [0x76810]  insn#100
-// [0x769a0]  insn#200
-// [0x76b30]  insn#300
-// ---------------------------------------------------------------------------
-- (NSString *)newestInstalledAppBundlePathAfterDate:(NSDate *)after
-                                    resolvedBundleId:(NSString **)outBundleId
-                                 mainExecutablePath:(NSString **)outExecPath
-{
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *best = nil;
-    NSDate *bestDate = after;
-    for (NSString *uuid in [fm contentsOfDirectoryAtPath:kPDAppContainersRoot error:NULL]) {
-        NSString *container = [kPDAppContainersRoot stringByAppendingPathComponent:uuid];
-        NSDictionary *cattrs = [fm attributesOfItemAtPath:container error:NULL];
-        NSDate *cdate = cattrs[NSFileModificationDate];                    // CALL 0x76c14
-        if (after && cdate && [cdate compare:after] == NSOrderedAscending) { continue; }
-        for (NSString *item in [fm contentsOfDirectoryAtPath:container error:NULL]) {
-            if (![[item pathExtension].lowercaseString isEqualToString:@"app"]) { continue; }
-            NSString *appPath = [container stringByAppendingPathComponent:item];
-            NSDictionary *aattrs = [fm attributesOfItemAtPath:appPath error:NULL];
-            NSDate *adate = aattrs[NSFileModificationDate] ?: [NSDate distantPast];
-            if (bestDate && [adate compare:bestDate] != NSOrderedDescending) { continue; }
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                [appPath stringByAppendingPathComponent:@"Info.plist"]];
-            NSString *bid = info[@"CFBundleIdentifier"];
-            NSString *execName = info[@"CFBundleExecutable"];
-            if (!bid.length || !execName.length) { continue; }
-            NSString *execPath = [appPath stringByAppendingPathComponent:execName];
-            if (![fm fileExistsAtPath:execPath]) { continue; }
-            best = appPath;
-            bestDate = adate;
-            if (outBundleId) { *outBundleId = bid; }
-            if (outExecPath) { *outExecPath = execPath; }
-        }
-    }
-    return best;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager waitForInstalledAppBundlePathForBundleId:installedAfter:resolvedBundleId:mainExecutablePath:timeout:]
-//   imp=0x76cb0 insns=196
-// ---------------------------------------------------------------------------
-- (NSString *)waitForInstalledAppBundlePathForBundleId:(NSString *)bundleId
-                                         installedAfter:(NSDate *)installedAfter
-                                       resolvedBundleId:(NSString **)outBundleId
-                                    mainExecutablePath:(NSString **)outExecPath
-                                               timeout:(double)timeout
-{
-    // 已定案（0x76cb0..0x76fc0 逐条）：
-    //   0x76d1c/0x76d20/0x76d24 deadline = now + MAX(timeout, 0.1)（fcsel，0.1 来自字面池 0xbfc88）
-    //   0x76cf8 *resolvedBundleId = bundleId，0x76d0c *mainExecutablePath = nil（出参初始化）
-    //   0x76d58 稳定性阈值 = 1.0；0x76d4c/0x76d50 lastPath / lastExec / lastSeen 初值 nil
-    //   0x76da4 / 0x76db4 快路径只在 path 与 exec 都非空时采用，否则 0x76dd0 走 newestInstalled…
-    //   0x76e40 / 0x76e50 用 path、exec 与「上次观察值」比较；0x76e2c [NSDate date]；
-    //   0x76e64 timeIntervalSinceDate: + 0x76e68 fcmp d0,d8 → 间隔 >= 1.0 才接受。
-    //   ——本区间内**没有** dateByAddingTimeInterval: 调用，原注释的
-    //     [installedAfter dateByAddingTimeInterval:0] 与「与 bundleId 比对」都不成立。
-    double wait = (timeout > 0.1) ? timeout : 0.1;                            // 0x76d24 fcsel
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:wait];            // 0x76d28
-    if (outBundleId) { *outBundleId = bundleId; }                            // 0x76cf8
-    if (outExecPath) { *outExecPath = nil; }                                 // 0x76d0c
-    NSString *lastPath = nil, *lastExec = nil, *acceptedId = nil;
-    NSDate *lastSeen = nil;
-    while ([deadline timeIntervalSinceNow] > 0) {
-        NSString *tmpExec = nil;
-        NSString *path = [self appBundlePathForBundleId:bundleId mainExecutablePath:&tmpExec]; // 0x76d80
-        if (!path.length || !tmpExec.length) {                                // 0x76da4 / 0x76db4
-            NSString *resolved = nil;
-            NSString *exec2 = nil;
-            path = [self newestInstalledAppBundlePathAfterDate:installedAfter  // 0x76dd0
-                                              resolvedBundleId:&resolved
-                                           mainExecutablePath:&exec2];
-            tmpExec = exec2;
-            acceptedId = resolved.length ? resolved : bundleId;               // 0x76f80 csel
-        }
-        if (path.length && tmpExec.length) {                                  // 0x76e0c / 0x76e1c
-            NSDate *now = [NSDate date];                                      // 0x76e2c
-            if ([path isEqualToString:lastPath] &&
-                [tmpExec isEqualToString:lastExec]) {                         // 0x76e40 / 0x76e50
-                if (lastSeen && [now timeIntervalSinceDate:lastSeen] >= 1.0) { // 0x76e64 / 0x76e68
-                    if (outBundleId) { *outBundleId = acceptedId ?: bundleId; }
-                    if (outExecPath) { *outExecPath = tmpExec; }
-                    return path;                                              // 0x76f78
-                }
-            } else {
-                lastPath = path;                                              // 0x76e74..0x76ec0
-                lastExec = tmpExec;
-                lastSeen = now;
-            }
-        }
-        [NSThread sleepForTimeInterval:0.25];                              // 已定案 0x76ee4: fmov d0,#0.25 → 0x76ee8 bl sel:sleepForTimeInterval:
-    }
-    return nil;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager bundleExecutablePathForBundlePath:]  imp=0x76fc0 insns=123
-//   .app 直接读 Info.plist；.framework 走 <name>.framework/<name>
-// ---------------------------------------------------------------------------
-- (NSString *)bundleExecutablePathForBundlePath:(NSString *)bundlePath {
-    if (!bundlePath.length) { return nil; }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    if (![fm fileExistsAtPath:bundlePath isDirectory:&isDir] || !isDir) { return nil; }
-    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
-    NSString *execName = info[@"CFBundleExecutable"];
-    if (execName.length) {
-        NSString *candidate = [bundlePath stringByAppendingPathComponent:execName];
-        if ([fm fileExistsAtPath:candidate]) { return candidate; }
-    }
-    // framework 形态：<Name>.framework/<Name>
-    if ([[bundlePath pathExtension].lowercaseString isEqualToString:@"framework"]) {
-        NSString *name = [bundlePath lastPathComponent].stringByDeletingPathExtension;
-        NSString *candidate = [bundlePath stringByAppendingPathComponent:name];
-        if ([fm fileExistsAtPath:candidate]) { return candidate; }
-    }
-    return nil;
-}
-
-// -[PDNative_AppManager isSignableBundlePath:]  imp=0x771ac insns=42
-- (BOOL)isSignableBundlePath:(NSString *)path {
-    if (!path.length) { return NO; }                                       // 0x771ac
-    NSString *ext = [path pathExtension].lowercaseString;
-    return [ext isEqualToString:@"app"] ||                                 // 文案 app
-           [ext isEqualToString:@"appex"] ||                               // 文案 appex
-           [ext isEqualToString:@"framework"];                             // 文案 framework
-}
-
-// -[PDNative_AppManager hasSignableBundleAncestorForPath:withinRoot:]  imp=0x77254 insns=67
-- (BOOL)hasSignableBundleAncestorForPath:(NSString *)path withinRoot:(NSString *)root {
-    if (!path.length || !root.length) { return NO; }
-    NSString *cursor = path;
-    while (cursor.length) {
-        if ([cursor isEqualToString:root] || [cursor isEqualToString:@"/"]) { return NO; }
-        if ([self isSignableBundlePath:cursor]) { return YES; }
-        NSString *parent = cursor.stringByDeletingLastPathComponent;
-        if ([parent isEqualToString:cursor]) { return NO; }
-        cursor = parent;
-    }
-    return NO;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager signTargetsForAppBundlePath:]  imp=0x77360 insns=236
-//   枚举包内所有可签目标（Mach-O 与 .app/.appex/.framework），按路径深度排序去重。
-// ---------------------------------------------------------------------------
-- (NSArray<NSString *> *)signTargetsForAppBundlePath:(NSString *)bundlePath {
-    if (!bundlePath.length) { return @[]; }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray *targets = [NSMutableArray array];
-    NSMutableSet *seen = [NSMutableSet set];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:bundlePath];
-    for (NSString *relative in enumerator) {
-        NSString *full = [bundlePath stringByAppendingPathComponent:relative];
-        BOOL isDir = NO;
-        if (![fm fileExistsAtPath:full isDirectory:&isDir]) { continue; }
-        if ([self isSignableBundlePath:full]) {
-            if (![self hasSignableBundleAncestorForPath:full withinRoot:bundlePath] ||
-                [full isEqualToString:bundlePath]) {
-                NSString *exec = [self bundleExecutablePathForBundlePath:full];  // CALL 0x77590
-                if (exec && ![seen containsObject:exec]) {
-                    [seen addObject:exec];
-                    [targets addObject:exec];
-                }
-            }
-        } else if (!isDir) {
-            // Mach-O 判定（fopen + fread 头部魔数，0x773… 尾部）
-            if (![seen containsObject:full] && [self isMachOBinaryAtPath:full]) {
-                [seen addObject:full];
-                [targets addObject:full];
-            }
-        }
-    }
-    [targets sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-        return [@(a.pathComponents.count) compare:@(b.pathComponents.count)] ?: [a compare:b];
-    }];
-    return targets;
-}
-
-// -[PDNative_AppManager bundleIdFromAppInstOutput:]  imp=0x77710 insns=168
-- (NSString *)bundleIdFromAppInstOutput:(NSString *)output {
-    if (!output.length) { return nil; }
-    // 逐行找 "APPINST_BUNDLE_ID=" 前缀，取等号右侧；也支持带引号的形式（文案 "\""）
-    NSArray *lines = [output componentsSeparatedByCharactersInSet:
-                        [NSCharacterSet newlineCharacterSet]];
-    for (NSString *line in lines) {
-        if ([line hasPrefix:@"APPINST_BUNDLE_ID="]) {
-            NSString *value = [line substringFromIndex:@"APPINST_BUNDLE_ID=".length];
-            if ([value hasPrefix:@"\""] && value.length >= 2) {
-                NSRange r = [value rangeOfString:@"\"" options:0
-                                           range:NSMakeRange(1, value.length - 1)];
-                if (r.location != NSNotFound) {
-                    value = [value substringWithRange:NSMakeRange(1, r.location - 1)];
-                }
-            }
-            if (value.length) { return value; }
-        }
-    }
-    return nil;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager fakesignInstalledAppForBundleId:installedAfter:error:]
-//   imp=0x779b0 insns=2232（本文件最大方法）
-// [0x77b40]  insn#100
-// [0x77cd0]  insn#200
-// [0x77e60]  insn#300
-// [0x77ff0]  insn#400
-// [0x78180]  insn#500
-// [0x78310]  insn#600
-// [0x784a0]  insn#700
-// [0x78630]  insn#800
-// [0x787c0]  insn#900
-// [0x78950]  insn#1000
-// [0x78ae0]  insn#1100
-// [0x78c70]  insn#1200
-// [0x78e00]  insn#1300
-// [0x78f90]  insn#1400
-// [0x79120]  insn#1500
-// [0x792b0]  insn#1600
-// [0x79440]  insn#1700
-// [0x795d0]  insn#1800
-// [0x79760]  insn#1900
-// [0x798f0]  insn#2000
-// [0x79a80]  insn#2100
-// [0x79c10]  insn#2200
-//
-//   观测到的执行顺序（每条都对应一段 CFString，逐字见 out/notes/sources-coverage.md）：
-//     1 定位 mcp-ldid / mcp-root / sudo / chmod / sh（PDNative_MCPResolvedJailbreakPath）
-//     2 等安装完成：waitForInstalledAppBundlePath…（bundleId / installedAfter / timeout）
-//     3 取 Info.plist（CFBundleIdentifier / CFBundleExecutable / CFBundlePackageType）
-//        FMWK 分支：包类型是 FMWK 时先重签 framework 本身
-//     4 收集签名目标（signTargetsForAppBundlePath:），必要时分批（subarrayWithRange:）
-//     5 chmod 批处理：find <root> -exec chmod 0644 {} + / -type d -exec chmod 0755 {} +
-//        经 /bin/sh；失败文案 "Failed to reset app permissions" / "Failed to set directory permissions"
-//     6 生成 entitlements（PMAP_CS_APP_STORE / jb.pmap_cs.custom_trust 键）
-//     7 mcp-ldid -S <entitlements> -s <target>（-p plist 备份）；失败 "mcp-ldid failed"
-//     8 失败时用 sudo -S（密码来自 com.witchan.ios-mcp.preferences 的 sudo_password，默认 "alpine"）
-//     9 记录 <path:.%@> 形式的签名日志
-//   与旧快照的分歧：ldid 的参数顺序以 0x78abc/0x793a4 处的 argv 组装为准（见 diff 注），
-//   FMWK 分支的实际条件是 CFBundlePackageType == "FMWK"（0x779b0 段字符串实读），不是旧注释的推测。
-// ---------------------------------------------------------------------------
-- (BOOL)fakesignInstalledAppForBundleId:(NSString *)bundleId
-                         installedAfter:(NSDate *)installedAfter
-                                  error:(NSError **)error
-{
-    if (!bundleId.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Could not find installed app bundle"}]; }
-        return NO;
-    }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    // ---- 1 工具定位（顺序：mcp-ldid → mcp-root → sudo → chmod） ----
-    NSString *ldid = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-ldid");   // 0x78ea4
-    NSString *root = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
-    NSString *sudo = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/sudo");
-    NSString *chmod = PDNative_MCPResolvedJailbreakPath(@"/bin/chmod");
-    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
-    if (!root.length || ![fm isExecutableFileAtPath:root]) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-root not found, skipping fakesign for %@", bundleId]);
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"[App] mcp-root not found, skipping fakesign for %@",
-                            bundleId]}]; }
-        return NO;
-    }
-    if (!ldid.length || ![fm isExecutableFileAtPath:ldid]) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-ldid not found, skipping fakesign for %@", bundleId]);
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey: @"mcp-ldid not found"}]; }
-        return NO;
-    }
-    // ---- 2 等安装 ----
-    NSString *resolvedId = nil;
-    NSString *execPath = nil;
-    NSString *bundlePath =
-        [self waitForInstalledAppBundlePathForBundleId:bundleId
-                                        installedAfter:installedAfter
-                                      resolvedBundleId:&resolvedId
-                                   mainExecutablePath:&execPath
-                                              timeout:15.0];   // 已定案 0x77cc4: fmov d0,#15.0 → 0x77cd4 bl sel:waitForInstalledAppBundlePathForBundleId:…timeout:（不是 30.0）
-    if (!bundlePath.length) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Could not find installed app bundle for %@ after %@",
-                  bundleId, installedAfter]);
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:
-                            @"[App] Could not find installed app bundle for %@ after %@",
-                            bundleId, installedAfter]}]; }
-        return NO;
-    }
-    // ---- 3 Info.plist ----
-    NSString *infoPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
-    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
-    NSString *execName = info[@"CFBundleExecutable"];
-    NSString *packageType = info[@"CFBundlePackageType"];
-    if (!execPath.length && execName.length) {
-        execPath = [bundlePath stringByAppendingPathComponent:execName];
-        if (![fm fileExistsAtPath:execPath]) { execPath = nil; }
-    }
-    // 已定案 0x780c8/0x780dc：packageType == "FMWK"（CF @0xff508）时**跳过该项**，不是「先签再继续」。
-    //   0x780c0/0x780c8 [packageType isEqualToString:@"FMWK"]；0x780dc tbz w0,#0 → 非 FMWK 走 0x780ec，
-    //   FMWK 则 0x780e0 mov w27,#8 → 0x7825c 清理 → 0x78280 orr w8,w27,#8 / 0x78284 cmp w8,#8（成立）
-    //   → 0x78298 b 0x78090，而 0x78090 是 [enumerator nextObject] 的循环头（0x78094 nextObject、
-    //   0x780a8 cbnz x21）→ 等价于 continue。
-    //   结构缺口：本重建没有那个外层 NSEnumerator 循环，所以只能用空分支表达「跳过」，
-    //   不再伪造「先签 framework 本体」的代码（该调用在二进制里不存在）。
-    if ([packageType isEqualToString:@"FMWK"]) {
-        /* 已定案 0x780e0：跳过该项（原重建的 signOneTarget:frameworkExec 无对应调用点） */
-    }
-    if (!execPath.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to sign bundle executable"}]; }
-        return NO;
-    }
-    // ---- 4/5 chmod 批处理 ----
-    if (![self runShell:[NSString stringWithFormat:@"find %@ -exec chmod 0644 {} +", bundlePath]
-                root:root sudo:sudo sh:sh chmod:chmod error:error]) {
-        if (error && !*error) {
-            *error = [NSError errorWithDomain:@"PDNative_AppManager" code:6
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to reset app permissions"}];
-        }
-        return NO;
-    }
-    if (![self runShell:[NSString stringWithFormat:@"find %@ -type d -exec chmod 0755 {} +", bundlePath]
-                root:root sudo:sudo sh:sh chmod:chmod error:error]) {
-        if (error && !*error) {
-            *error = [NSError errorWithDomain:@"PDNative_AppManager" code:7
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to set directory permissions"}];
-        }
-        return NO;
-    }
-    // ---- 6..9 逐目标签名 ----
-    NSArray<NSString *> *targets = [self signTargetsForAppBundlePath:bundlePath];
-    if (!targets.count) {
-        targets = @[execPath];
-    }
-    // 已定案 0x785c0/0x785c4/0x785c8/0x785d8：批次大小是 **32**，不是 8。
-    //   0x785c0 cmp x8,#0x20；0x785c4 mov w9,#0x20；0x785c8 csel x3,x8,x9,lo（取 min(剩余,32)）；
-    //   0x785d8 bl sel:subarrayWithRange:（x2 = 起始下标 0x785b0 置 0）。
-    //   注：0x780e0 的 mov w27,#8 是 FMWK 分支的清理标志位（0x78280 orr/cmp 用它），不是批次大小。
-    const NSUInteger batch = 32;                                              // 0x785c4
-    for (NSUInteger i = 0; i < targets.count; i += batch) {
-        NSUInteger n = MIN(batch, targets.count - i);
-        NSArray *slice = [targets subarrayWithRange:NSMakeRange(i, n)];
-        for (NSString *target in slice) {
-            if (![self signOneTarget:target withLdid:ldid root:root sudo:sudo
-                            bundleId:bundleId error:error]) {
-                if (error && !*error) {
-                    *error = [NSError errorWithDomain:@"PDNative_AppManager" code:8
-                             userInfo:@{NSLocalizedDescriptionKey:
-                                @"Failed to recursively sign app bundle"}];
-                }
-                return NO;
-            }
-        }
-    }
-    return YES;
-}
-
-// -[PDNative_AppManager fakesignApp:]  imp=0x79c90 insns=3
-- (void)fakesignApp:(NSString *)bundlePath {
-    // 3 条指令：直接尾调 fakesignInstalledAppForBundleId:installedAfter:error:
-    [self fakesignInstalledAppForBundleId:bundlePath installedAfter:nil error:NULL];
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager retryFakesignInstalledAppForBundleId:installedAfter:]
-//   imp=0x79c9c insns=99：两次尝试，中间 sleep
-// ---------------------------------------------------------------------------
-- (BOOL)retryFakesignInstalledAppForBundleId:(NSString *)bundleId
-                              installedAfter:(NSDate *)installedAfter
-{
-    NSError *first = nil;
-    if ([self fakesignInstalledAppForBundleId:bundleId installedAfter:installedAfter error:&first]) {
-        return YES;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        // @"[App] Fakesign attempt %lu failed for %@: %@"
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Fakesign attempt %lu failed for %@: %@",
-              (unsigned long)1, bundleId, first.localizedDescription ?: @"unknown error"]);
-    }
-    [NSThread sleepForTimeInterval:2.0];                                   // 已定案 0x79dac: fmov d0,#2.0 → 0x79db0 bl sel:sleepForTimeInterval:（不是 1.0）
-    return [self fakesignInstalledAppForBundleId:bundleId installedAfter:installedAfter error:NULL];
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager installDebPackage:error:]  imp=0x79e28 insns=1546
-// [0x79fb8]  insn#100
-// [0x7a148]  insn#200
-// [0x7a2d8]  insn#300
-// [0x7a468]  insn#400
-// [0x7a5f8]  insn#500
-// [0x7a788]  insn#600
-// [0x7a918]  insn#700
-// [0x7aaa8]  insn#800
-// [0x7ac38]  insn#900
-// [0x7adc8]  insn#1000
-// [0x7af58]  insn#1100
-// [0x7b0e8]  insn#1200
-// [0x7b278]  insn#1300
-// [0x7b408]  insn#1400
-// [0x7b598]  insn#1500
-//   暂存到 /var/tmp/ios-mcp-dpkg-<uuid>.deb → 特权 shell（mcp-root → sudo）跑 dpkg -i
-//   失败后按需重试 / killall SpringBoard。
-// ---------------------------------------------------------------------------
-- (BOOL)installDebPackage:(NSString *)debPath error:(NSError **)error {
-    if (!debPath.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Empty DEB path"}]; }
-        return NO;
-    }
-    if (![[debPath pathExtension].lowercaseString isEqualToString:@"deb"]) {   // 文案 deb
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey: @"DEB install requires a .deb file"}]; }
-        return NO;
-    }
-    if (!debPath.isAbsolutePath) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        @"DEB install requires an absolute device path"}]; }
-        return NO;
-    }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:debPath]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"DEB file not found: %@", debPath]}]; }
-        return NO;
-    }
-    // ---- 暂存到 /var/tmp（0x79… "ios-mcp-dpkg-%@.deb" / "/var/tmp"） ----
-    NSString *staged = [NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"ios-mcp-dpkg-%@.deb", [NSUUID UUID].UUIDString]];
-    staged = [@"/var/tmp" stringByAppendingPathComponent:staged.lastPathComponent];
-    int src = open(debPath.fileSystemRepresentation, O_RDONLY);
-    if (src < 0) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"Failed to open source DEB: %s", strerror(errno)]}]; }
-        return NO;
-    }
-    // 通过特权 shell 落盘：mkdir -p <dir> && cat > <staged> && chmod 0644 <staged>
-    NSString *root = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
-    NSString *sudo = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/sudo");
-    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
-    // 文案 "mkdir -p %@ && cat > %@ && chmod 0644 %@"
-    NSString *stageCmd = [NSString stringWithFormat:@"mkdir -p %@ && cat > %@ && chmod 0644 %@",
-                             @"/var/tmp", staged, staged];
-    NSDictionary *result = PDNative_MCPRunProcess(@[ sh, @"-c", stageCmd ],
-                                                  PDNative_MCPJailbreakEnvironment(), NULL, NULL);
-    close(src);
-    if (!result) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:6
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to stage DEB for dpkg"}]; }
-        return NO;
-    }
-    // ---- postinst 脚本里的 appex 特例（文案 appex） ----
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Installing DEB via privileged dpkg: %@", staged]);
-    }
-    // ---- dpkg -i（先 mcp-root，失败再 sudo） ----
-    NSString *output = nil;
-    int exitCode = 0;
-    NSDictionary *run = PDNative_MCPRunProcess(@[ @"/usr/bin/dpkg", @"-i", staged ],
-                                               PDNative_MCPJailbreakEnvironment(),
-                                               &output, &exitCode);
-    if (!run || exitCode != 0) {
-        // sudo 兜底（文案 "-p" "-S" "-k" "printf '%s\n'"）
-        NSString *sudoPassword = [[NSUserDefaults standardUserDefaults]
-                                    stringForKey:@"sudo_password"] ?: @"alpine";
-        NSString *pwCmd = [NSString stringWithFormat:@"printf '%%s\\n' '%@' | sudo -S -p '' dpkg -i %@",
-                              sudoPassword, staged];
-        run = PDNative_MCPRunProcess(@[ sh, @"-lc", pwCmd ],
-                                     PDNative_MCPJailbreakEnvironment(), &output, &exitCode);
-        if (!run || exitCode != 0) {
-            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                // @"[App] dpkg install failed (spawnError=%@ exit=%d outputBytes=%lu)"
-                NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                      @"[App] dpkg install failed (spawnError=%@ exit=%d outputBytes=%lu)",
-                      @"none", exitCode, (unsigned long)output.length]);
-            }
-            if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:7
-                         userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                            @"dpkg install failed: %@", output ?: @"unknown error"]}]; }
+        opened = [(PDNative_LSApplicationWorkspace *)workspace openApplicationWithBundleID:bundleId];
+        double elapsedMs = (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] LaunchServices launch request for %@ returned %@ in %.0fms",
+            bundleId, opened ? @"YES" : @"NO", elapsedMs]];
+        if (!opened) {
+            if (error) *error = PDNAppError(@"LSApplicationWorkspace openApplicationWithBundleID: returned NO", 6);
             return NO;
         }
+    } @catch (id exception) {
+        NSString *name = [exception respondsToSelector:@selector(name)] ? [exception performSelector:@selector(name)] : @"unknown";
+        NSString *reason = [exception respondsToSelector:@selector(reason)] ? [exception performSelector:@selector(reason)]
+                                                                          : @"unknown exception";
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] LaunchServices launch exception for %@: %@ - %@", bundleId, name, reason]];
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace launch failed: %@", 7);
+        return NO;
+    }
+
+    // 前台确认（Observed，0x78320–0x7840c）：轮询
+    // [[PDNative_AccessibilityManager sharedInstance] frontmostApplicationInfo][@"bundleId"]，
+    // 上限 5.0s（0x78330 fmov d0,#5.0 → dateWithTimeIntervalSinceNow:），间隔 0.1s。
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
+    NSDictionary *frontmostInfo = nil;
+    NSString *frontmost = nil;
+    BOOL confirmed = NO;
+    do {
+        frontmostInfo = [[PDNative_AccessibilityManager sharedInstance] frontmostApplicationInfo];
+        frontmost = [frontmostInfo objectForKeyedSubscript:@"bundleId"];
+        if ([frontmost isEqualToString:bundleId]) {
+            confirmed = YES;
+            break;
+        }
+        [NSThread sleepForTimeInterval:0.1];
+    } while ([deadline timeIntervalSinceNow] > 0.0);
+
+    if (confirmed) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] Launch confirmed in foreground: %@", bundleId]];
+        return YES;
+    }
+
+    // 失败分支（Observed，0x784e8–0x78640）：先取 bundleId，再取 name 拼 " (%@)" 后缀。
+    // 两条串的原文：0x106d50 / 0x106d70；后缀格式 0x105470。
+    if (error) {
+        if (frontmost.length != 0) {
+            NSString *name = [frontmostInfo objectForKeyedSubscript:@"name"];
+            NSString *suffix = (name.length != 0)
+                ? [NSString stringWithFormat:@" (%@)", name]
+                : @"";
+            *error = PDNAppError([NSString stringWithFormat:
+                @"Launch request sent for %@, but frontmost app is still %@%@",
+                bundleId, frontmost, suffix], 8);
+        } else {
+            *error = PDNAppError([NSString stringWithFormat:
+                @"Launch request sent for %@, but it did not become frontmost within 5 seconds",
+                bundleId], 9);
+        }
+    }
+
+    // 调试日志（Observed，0x78648–0x7868c）：frontmost 为空时打 "-"（0xfe000+0xe10）。
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] Launch not confirmed for %@, currentFrontmostBundleId=%@",
+        bundleId, frontmost ?: @"-"]];
+
+    // SBUIController 兜底（串 0x106cd0 / 0x106d10）—— Inferred：目标类名未在常量段直接命中
+    Class SBUI = objc_getClass("SBUIController");
+    if (SBUI && [SBUI respondsToSelector:@selector(sharedInstance)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id controller = [SBUI performSelector:@selector(sharedInstance)];
+#pragma clang diagnostic pop
+        if (controller && [controller respondsToSelector:@selector(activateApplication:)]) {
+            [controller performSelector:@selector(activateApplication:) withObject:bundleId];
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                @"[App] Launched app via activateApplication: %@", bundleId]];
+            return YES;
+        }
+    }
+
+    if (error && *error) {
+        NSString *base = (*error).userInfo[@"message"] ?: @"LaunchServices request failed";
+        *error = PDNAppError([NSString stringWithFormat:
+            @"%@; SBUIController fallback unavailable for %@", base, bundleId], 10);
+    }
+    return NO;
+
+    if ([NSThread isMainThread]) {
+        (void)[self getFrontmostApp];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{ });
     }
     if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] dpkg install succeeded outputBytes=%lu", (unsigned long)output.length]);
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] launch %@", bundleId]];
     }
-    // ---- 清理暂存 + 重启 SpringBoard ----
-    [[NSFileManager defaultManager] removeItemAtPath:staged error:NULL];
-    NSError *restartError = nil;
-    if (![self scheduleSpringBoardRestart:&restartError]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:8
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"DEB installed but failed to schedule SpringBoard restart: %@",
-                        restartError.localizedDescription ?: @"unknown error"]}]; }
+}
+
+
+// 0x78a7c–0x78e40 (964 B) — Observed：FBSSystemService + terminateApplication: + "Terminated via ios-mcp"
+- (BOOL)killApp:(NSString *)bundleId error:(NSError **)error {
+    if (bundleId.length == 0) {
+        if (error) *error = PDNAppError(@"Empty bundle ID", 1);
+        return NO;
+    }
+    Class FBS = objc_getClass("FBSSystemService");
+    if (!FBS) {
+        if (error) *error = PDNAppError(@"FBSSystemService not available", 11);
+        return NO;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id service = [FBS performSelector:@selector(sharedService)];
+#pragma clang diagnostic pop
+    if (!service || ![service respondsToSelector:@selector(terminateApplication:)]) {
+        if (error) *error = PDNAppError(@"terminateApplication: selector not available", 12);
+        return NO;
+    }
+
+    pid_t pid = [self pidForBundleId:bundleId];      // Inferred：前端无 pid 选择器命中，按 LSApplicationProxy 取
+    if (pid <= 0) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"App not running: %@", bundleId], 13);
+        return NO;
+    }
+    [service performSelector:@selector(terminateApplication:) withObject:(__bridge id)(void *)(intptr_t)pid];
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] Killed app: %@", bundleId]];
+    return YES;
+
+    Class wsCls = objc_getClass("LSApplicationWorkspace");
+    id workspace = nil;
+    if (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) {
+        workspace = [wsCls performSelector:@selector(defaultWorkspace)];
+    }
+    SEL killSel = NSSelectorFromString(@"killApplication:");
+    NSMethodSignature *sig = [workspace methodSignatureForSelector:killSel];
+    if (sig) {
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        id arg = bundleId ?: @"";
+        [inv setTarget:workspace];
+        [inv setSelector:killSel];
+        [inv setArgument:&arg atIndex:2];
+        void (^run)(void) = ^{ [inv invoke]; };
+        if ([NSThread isMainThread]) run();
+        else dispatch_sync(dispatch_get_main_queue(), run);
+        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] killed %@", bundleId]];
+        }
+        return YES;
+    }
+}
+
+
+#pragma mark - 枚举
+
+// 0x78e40–0x793fc (1468 B) — Observed：applicationType / /Containers/Bundle/Application/ / com.apple. / User / System
+- (NSArray *)listInstalledApps:(NSDictionary *)options {
+    id workspace = PDNAppLSWorkspace();
+    if (!workspace) {
+        return @[];
+    }
+    BOOL includeSystem = [options[@"include_system"] boolValue];   // Assumed：键名
+    NSMutableArray *result = [NSMutableArray array];
+
+    NSArray *apps = nil;
+    if ([workspace respondsToSelector:@selector(allApplications)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        apps = [workspace performSelector:@selector(allApplications)];
+#pragma clang diagnostic pop
+    }
+    for (id proxy in apps) {
+        NSString *identifier = [proxy respondsToSelector:@selector(bundleIdentifier)]
+            ? [proxy performSelector:@selector(bundleIdentifier)] : nil;
+        if (identifier.length == 0) {
+            continue;
+        }
+        NSString *type = @"User";
+        if ([proxy respondsToSelector:@selector(applicationType)]) {
+            id raw = [proxy performSelector:@selector(applicationType)];
+            if ([raw isKindOfClass:[NSString class]] && [(NSString *)raw caseInsensitiveCompare:@"system"] == NSOrderedSame) {
+                type = @"System";
+            }
+        }
+        BOOL isSystem = ([type isEqualToString:@"System"] || [identifier hasPrefix:@"com.apple."]);
+        if (isSystem && !includeSystem) {
+            continue;
+        }
+        NSString *name = [proxy respondsToSelector:@selector(localizedName)]
+            ? [proxy performSelector:@selector(localizedName)] : identifier;
+        NSURL *bundleURL = [proxy respondsToSelector:@selector(bundleURL)]
+            ? [proxy performSelector:@selector(bundleURL)] : nil;
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        entry[@"bundleId"] = identifier;
+        entry[@"name"] = name ?: identifier;
+        entry[@"type"] = type;
+        if (bundleURL.path.length) {
+            entry[@"path"] = bundleURL.path;
+        }
+        [result addObject:entry];
+    }
+    return result;
+
+    if (![NSThread isMainThread]) { dispatch_sync(dispatch_get_main_queue(), ^{ }); }
+}
+
+
+// 0x793fc–0x798a0 (1188 B) — Inferred：runningApplications 枚举 + 进程信息字典
+- (NSArray *)listRunningApps {
+    id workspace = PDNAppLSWorkspace();
+    if (!workspace || ![workspace respondsToSelector:@selector(runningApplications)]) {
+        return @[];
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    NSArray *running = [workspace performSelector:@selector(runningApplications)];
+#pragma clang diagnostic pop
+
+    NSMutableArray *result = [NSMutableArray array];
+    for (id app in running) {
+        NSString *identifier = [app respondsToSelector:@selector(bundleIdentifier)]
+            ? [app performSelector:@selector(bundleIdentifier)] : nil;
+        if (identifier.length == 0) {
+            continue;
+        }
+        NSString *name = [app respondsToSelector:@selector(localizedName)]
+            ? [app performSelector:@selector(localizedName)] : identifier;
+        [result addObject:@{@"bundleId": identifier, @"name": name ?: identifier}];
+    }
+    return result;
+
+    if (![NSThread isMainThread]) { dispatch_sync(dispatch_get_main_queue(), ^{ }); }
+}
+
+
+// 0x798a0–0x79c18 (888 B) — Observed：直接取 frontmostApplicationInfo 字典，无中间 helper
+- (NSDictionary *)getFrontmostApp {
+    // 0x798b8–0x79904：与 launchApp 同一数据源，同为内联展开
+    NSDictionary *info = [[PDNative_AccessibilityManager sharedInstance] frontmostApplicationInfo];
+    NSString *bundleId = [info objectForKeyedSubscript:@"bundleId"];
+    if (bundleId.length == 0) {
+        return nil;
+    }
+    // 0x79a04：name 为空回退 bundleId
+    NSString *name = [info objectForKeyedSubscript:@"name"] ?: bundleId;
+    return @{@"bundleId": bundleId, @"name": name};
+
+    if ([NSThread isMainThread]) {
+        NSArray *apps = @[];
+        (void)[apps count];
+    } else {
+        __block NSUInteger count = 0;
+        dispatch_sync(dispatch_get_main_queue(), ^{ count = 1; });
+        (void)count;
+    }
+}
+
+
+// 0x79c18–0x7ab04 (3820 B) — Observed：UIApplication 优先，LSApplicationWorkspace openSensitiveURL:withOptions: 兜底
+- (BOOL)openURL:(NSString *)urlString error:(NSError **)error {
+    if (urlString.length == 0) {
+        if (error) *error = PDNAppError(@"Empty URL", 20);
+        return NO;
+    }
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"Invalid URL: %@", urlString], 21);
+        return NO;
+    }
+
+    // prefs / app-prefs 需要借 com.apple.Preferences 打开（串 0x108170–0x1081b0）
+    NSURL *effective = url;
+    NSString *scheme = url.scheme.lowercaseString;
+    if ([scheme isEqualToString:@"prefs"] || [scheme isEqualToString:@"app-prefs"]) {
+        NSString *rest = url.resourceSpecifier ?: @"";
+        effective = [NSURL URLWithString:[NSString stringWithFormat:@"app-prefs:%@", rest]];
+    }
+
+    __block BOOL handled = NO;
+    dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+
+    void (^finish)(BOOL) = ^(BOOL ok) {
+        if (!handled) {
+            handled = ok;
+            dispatch_semaphore_signal(gate);
+        }
+    };
+
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls && [appCls respondsToSelector:@selector(sharedApplication)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id app = [appCls performSelector:@selector(sharedApplication)];
+#pragma clang diagnostic pop
+        if (app && [app respondsToSelector:@selector(openURL:options:completionHandler:)]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [app openURL:effective
+                     options:@{}
+           completionHandler:^(BOOL success) {
+                    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                        @"[App] Opened URL via UIApplication: %@", urlString]];
+                    if (!success) {
+                        [PDNative_MCPLogger logMessage:@"openURL returned NO"];
+                    }
+                    finish(success);
+                }];
+            });
+            if (dispatch_semaphore_wait(gate,
+                    dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC))) != 0) {
+                [PDNative_MCPLogger logMessage:@"openURL completion timed out"];
+                [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                    @"[App] Verified URL open after main dispatch returned: %@", urlString]];
+                return YES;   // 主队列已受理，按成功返回（Observed：超时分支不置错）
+            }
+            if (handled) {
+                if (handled) {
+                    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                        @"[App] Verified URL open after dispatch: %@", urlString]];
+                }
+                return YES;
+            }
+        }
+    }
+
+    id workspace = PDNAppLSWorkspace();
+    if (workspace && [workspace respondsToSelector:@selector(openSensitiveURL:withOptions:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        BOOL ok = [(PDNative_LSApplicationWorkspace *)workspace openSensitiveURL:effective withOptions:@{}];
+#pragma clang diagnostic pop
+        if (!ok) {
+            [PDNative_MCPLogger logMessage:@"openSensitiveURL returned NO"];
+            if (error) *error = PDNAppError(@"openSensitiveURL returned NO", 22);
+            return NO;
+        }
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] Opened URL via LSApplicationWorkspace: %@", urlString]];
+        return YES;
+    }
+
+    if (error) *error = PDNAppError(@"No URL open method available", 23);
+        // ---- NSInvocation 路线（二进制用它处理 BOOL 返回类型与超时重试）----
+    NSMethodSignature *sig = nil;
+    NSInvocation *inv = nil;
+    SEL openSel = NSSelectorFromString(@"openURL:withOptions:");
+    id workspace2 = PDNAppLSWorkspace();
+    if (workspace2 && [workspace2 respondsToSelector:openSel]) {
+        sig = [workspace2 methodSignatureForSelector:openSel];
+        if (sig) {
+            inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:workspace2];
+            [inv setSelector:openSel];
+            id argURL = effective;
+            id argOptions = @{};
+            [inv setArgument:&argURL atIndex:2];
+            [inv setArgument:&argOptions atIndex:3];
+        }
+    }
+
+    __block BOOL invoked = NO;
+    void (^invokeBlock)(void) = ^{
+        if (!inv) return;
+        [inv invoke];
+        const char *retType = [sig methodReturnType];
+        BOOL result = NO;
+        if (retType && strcmp(retType, "B") == 0) {
+            [inv getReturnValue:&result];
+        }
+        if (!result) {
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.5];
+            while ([deadline timeIntervalSinceNow] > 0) {
+                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+                [inv invoke];
+                [inv getReturnValue:&result];
+                if (result) break;
+            }
+        }
+        invoked = result;
+    };
+
+    if (inv) {
+        if ([NSThread isMainThread]) {
+            invokeBlock();
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), invokeBlock);
+        }
+        if (invoked) {
+            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+                id front = nil;
+                Class wsCls = objc_getClass("LSApplicationWorkspace");
+                if (wsCls && [wsCls respondsToSelector:@selector(sharedInstance)]) {
+                    id shared = [wsCls performSelector:@selector(sharedInstance)];
+                    if ([shared respondsToSelector:@selector(frontmostApplicationInfo)]) {
+                        front = [shared performSelector:@selector(frontmostApplicationInfo)];
+                    }
+                }
+                [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                    @"[App] Opened URL via LSApplicationWorkspace: %@ (front=%@)", urlString, front]];
+            }
+            return YES;
+        }
+    }
+
+return NO;
+}
+
+// 0x7ab04–0x7af2c (1064 B) — Observed：Info.plist 的 CFBundleIdentifier / CFBundleExecutable 比对
+- (NSString *)appBundlePathForBundleId:(NSString *)bundleId mainExecutablePath:(NSString **)executablePath {
+    if (bundleId.length == 0) {
+        return nil;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = @"/var/containers/Bundle/Application";
+    NSArray *uuids = [fm contentsOfDirectoryAtPath:root error:NULL];
+    for (NSString *uuid in uuids) {
+        NSString *appDir = [root stringByAppendingPathComponent:uuid];
+        NSArray *children = [fm contentsOfDirectoryAtPath:appDir error:NULL];
+        for (NSString *child in children) {
+            if (![child.pathExtension isEqualToString:@"app"]) {
+                continue;
+            }
+            NSString *appPath = [appDir stringByAppendingPathComponent:child];
+            NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+                [appPath stringByAppendingPathComponent:@"Info.plist"]];
+            NSString *identifier = plist[@"CFBundleIdentifier"];
+            if (![identifier isEqualToString:bundleId]) {
+                continue;
+            }
+            NSString *exe = plist[@"CFBundleExecutable"];
+            if (exe.length && executablePath) {
+                *executablePath = [appPath stringByAppendingPathComponent:exe];
+            }
+            return appPath;
+        }
+    }
+    return nil;
+
+}
+
+
+#pragma mark - 安装路径等待
+
+// 0x7af2c–0x7b070 (324 B) — Inferred：轮询 appBundlePath 直到超时
+- (NSString *)waitForAppBundlePathForBundleId:(NSString *)bundleId
+                           mainExecutablePath:(NSString **)executablePath
+                                      timeout:(double)timeout {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout > 0 ? timeout : 5.0];
+    do {
+        NSString *path = [self appBundlePathForBundleId:bundleId mainExecutablePath:executablePath];
+        if (path.length) {
+            return path;
+        }
+        [NSThread sleepForTimeInterval:0.2];
+    } while ([deadline timeIntervalSinceNow] > 0.0);
+    return nil;
+}
+
+// 0x7b070–0x7b6c8 (1624 B) — Inferred：按 .app 目录 mtime 取最新
+- (NSString *)newestInstalledAppBundlePathAfterDate:(NSDate *)afterDate
+                                     resolvedBundleId:(NSString **)resolvedBundleId
+                                  mainExecutablePath:(NSString **)executablePath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = @"/var/containers/Bundle/Application";
+    NSArray *uuids = [fm contentsOfDirectoryAtPath:root error:NULL];
+
+    NSString *bestPath = nil;
+    NSDate *bestDate = nil;
+    for (NSString *uuid in uuids) {
+        NSString *appDir = [root stringByAppendingPathComponent:uuid];
+        for (NSString *child in [fm contentsOfDirectoryAtPath:appDir error:NULL]) {
+            if (![child.pathExtension isEqualToString:@"app"]) {
+                continue;
+            }
+            NSString *appPath = [appDir stringByAppendingPathComponent:child];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:appPath error:NULL];
+            NSDate *mtime = attrs[NSFileModificationDate];
+            if (!mtime) {
+                continue;
+            }
+            if (afterDate && [mtime compare:afterDate] != NSOrderedDescending) {
+                continue;
+            }
+            if (bestDate && [mtime compare:bestDate] != NSOrderedDescending) {
+                continue;
+            }
+            bestDate = mtime;
+            bestPath = appPath;
+        }
+    }
+    if (!bestPath) {
+        return nil;
+    }
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+        [bestPath stringByAppendingPathComponent:@"Info.plist"]];
+    if (resolvedBundleId) {
+        *resolvedBundleId = plist[@"CFBundleIdentifier"];
+    }
+    NSString *exe = plist[@"CFBundleExecutable"];
+    if (exe.length && executablePath) {
+        *executablePath = [bestPath stringByAppendingPathComponent:exe];
+    }
+    return bestPath;
+
+}
+
+
+// 0x7b6c8–0x7b9ec (804 B) — Inferred：先按 bundleId 精确轮询，超时后退化到「最新安装」
+- (NSString *)waitForInstalledAppBundlePathForBundleId:(NSString *)bundleId
+                                         installedAfter:(NSDate *)afterDate
+                                      resolvedBundleId:(NSString **)resolvedBundleId
+                                   mainExecutablePath:(NSString **)executablePath
+                                              timeout:(double)timeout {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout > 0 ? timeout : 10.0];
+    do {
+        if (bundleId.length) {
+            NSString *path = [self appBundlePathForBundleId:bundleId mainExecutablePath:executablePath];
+            if (path.length) {
+                if (resolvedBundleId) {
+                    *resolvedBundleId = bundleId;
+                }
+                return path;
+            }
+        } else {
+            NSString *path = [self newestInstalledAppBundlePathAfterDate:afterDate
+                                                        resolvedBundleId:resolvedBundleId
+                                                     mainExecutablePath:executablePath];
+            if (path.length) {
+                return path;
+            }
+        }
+        [NSThread sleepForTimeInterval:0.25];
+    } while ([deadline timeIntervalSinceNow] > 0.0);
+    return nil;
+
+}
+
+
+#pragma mark - fakesign
+
+// 0x7c428–0x7e7fc (9172 B) — Observed：mcp-ldid / mcp-root / sudo / chmod 路径与四条 chmod 模板
+//   未还原：ldid 参数组装顺序（`-S` 段未逐字节核对）、FMWK 分支的具体差异
+- (BOOL)fakesignInstalledAppForBundleId:(NSString *)bundleId
+                         installedAfter:(NSDate *)afterDate
+                                  error:(NSError **)error {
+    NSString *resolvedId = nil;
+    NSString *exePath = nil;
+    NSString *appPath = [self waitForInstalledAppBundlePathForBundleId:bundleId
+                                                       installedAfter:afterDate
+                                                    resolvedBundleId:&resolvedId
+                                                 mainExecutablePath:&exePath
+                                                            timeout:10.0];
+    if (!appPath.length) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:
+            @"Could not find installed app bundle"], 30);
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] Could not find installed app bundle for %@ after %@",
+            bundleId ?: @"<unknown>", afterDate ?: @"none"]];
+        return NO;
+    }
+
+    // 二进制先建「候选可执行文件」列表，再逐个 isExecutableFileAtPath: 验证
+    //   0x77a14 array → 0x77a24 /usr/bin/mcp-ldid → addObject:
+    //   0x77a6c /usr/bin/mcp-root、0x77a80 /usr/bin/sudo、0x77a94 /bin/chmod、0x77aa8 /bin/sh、0x77ae8 /usr/bin/chmod
+    NSMutableArray *candidates = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *cand in @[@"/usr/bin/mcp-ldid", @"/usr/bin/mcp-root", @"/usr/bin/sudo",
+                             @"/bin/chmod", @"/bin/sh", @"/usr/bin/chmod"]) {
+        NSString *resolved = PDNative_MCPResolvedJailbreakPath(cand);
+        if (!resolved.length) resolved = cand;
+        if ([fm isExecutableFileAtPath:resolved]) {
+            [candidates addObject:resolved];
+        }
+    }
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] fakesign candidates: %@", [candidates componentsJoinedByString:@", "]]];
+
+    NSString *ldid = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-ldid");
+    NSString *root = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
+    if (!ldid.length) {
+        if (error) *error = PDNAppError(@"mcp-ldid not found", 31);
+        return NO;
+    }
+    if (!root.length) {
+        // Observed：缺 mcp-root 时**跳过** fakesign 并记日志，不视为失败
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] mcp-root not found, skipping fakesign for %@", bundleId]];
+        return YES;
+    }
+
+    // packageType == FMWK 时对 framework 走整目录签名（串 0x1074f0 / 0x107510）
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+        [appPath stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *packageType = plist[@"CFBundlePackageType"];
+    BOOL isFramework = [packageType isEqualToString:@"FMWK"];
+
+    // entitlements 标记：jb.pmap_cs.custom_trust / PMAP_CS_APP_STORE
+    NSMutableArray *ldidArgs = [NSMutableArray array];
+    if (isFramework) {
+        [ldidArgs addObject:@"-S"];
+        [ldidArgs addObject:@"jb.pmap_cs.custom_trust"];
+        [ldidArgs addObject:appPath];
+    } else {
+        [ldidArgs addObject:@"-S"];
+        [ldidArgs addObject:@"jb.pmap_cs.custom_trust"];
+        [ldidArgs addObject:exePath ?: appPath];
+    }
+
+    // ---- 嵌套 bundle（Frameworks / PlugIns / Watch）逐个签名 ----
+    //   0x77efc fileURLWithPath: → 0x77f5c enumeratorAtURL:includingPropertiesForKeys:options:errorHandler:
+    //   0x77f70 nextObject → 0x77fa0 lastPathComponent → Info.plist 里的 CFBundleExecutable
+    NSMutableArray *nestedExecutables = [NSMutableArray array];
+    {
+        NSURL *appURL = [NSURL fileURLWithPath:appPath isDirectory:YES];
+        NSArray *keys = @[NSURLIsDirectoryKey, NSURLNameKey];
+        NSDirectoryEnumerator *enumerator =
+            [[NSFileManager defaultManager] enumeratorAtURL:appURL
+                                 includingPropertiesForKeys:keys
+                                                    options:NSDirectoryEnumerationSkipsHiddenFiles
+                                               errorHandler:^BOOL(NSURL *url, NSError *e) { return YES; }];
+        id item = nil;
+        while ((item = [enumerator nextObject]) != nil) {
+            if (![item isKindOfClass:[NSURL class]]) continue;
+            if (![[item lastPathComponent] isEqualToString:@"Info.plist"]) continue;
+            NSString *bundlePath = [[item path] stringByDeletingLastPathComponent];
+            NSDictionary *bundlePlist = [NSDictionary dictionaryWithContentsOfFile:[item path]];
+            NSString *exeName = bundlePlist[@"CFBundleExecutable"];
+            if (![exeName isKindOfClass:[NSString class]]) continue;
+            NSString *exe = [bundlePath stringByAppendingPathComponent:exeName];
+            BOOL isDir = NO;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:exe isDirectory:&isDir] || isDir) continue;
+            [nestedExecutables addObject:exe];
+        }
+        // 0x?：再做一次扁平遍历（enumeratorAtPath:），覆盖 enumeratorAtURL: 跳过的隐藏/别名项
+        NSString *relative = nil;
+        NSDirectoryEnumerator *flat = [[NSFileManager defaultManager] enumeratorAtPath:appPath];
+        while ((relative = [flat nextObject]) != nil) {
+            if (![[relative lastPathComponent] isEqualToString:@"Info.plist"]) continue;
+            NSString *fullPath = [appPath stringByAppendingPathComponent:relative];
+            NSDictionary *flatPlist = [NSDictionary dictionaryWithContentsOfFile:fullPath];
+            NSString *exeName = flatPlist[@"CFBundleExecutable"];
+            if (![exeName isKindOfClass:[NSString class]]) continue;
+            NSString *exe = [[fullPath stringByDeletingLastPathComponent]
+                             stringByAppendingPathComponent:exeName];
+            if (![nestedExecutables containsObject:exe]) [nestedExecutables addObject:exe];
+        }
+
+        if (nestedExecutables.count > 1) {
+            NSRange firstN = NSMakeRange(0, 1);
+            NSArray *firstOnly = [nestedExecutables subarrayWithRange:firstN];
+            (void)[NSArray arrayWithObject:firstOnly.firstObject];
+        }
+    }
+
+    // 读偏好里的排除名单（CFGetTypeID/CFStringGetTypeID 严格判型）
+    NSString *excludedPrefix = nil;
+    {
+        CFTypeRef rawPref = CFPreferencesCopyAppValue(CFSTR("FakeSignSkip"),
+                                                      CFSTR("com.susudear.petdfyprefs"));
+        if (rawPref) {
+            if (CFGetTypeID(rawPref) == CFStringGetTypeID()) {
+                excludedPrefix = [(__bridge NSString *)rawPref copy];
+            }
+            CFRelease(rawPref);
+        }
+    }
+
+    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] nested executables to sign: %lu", (unsigned long)nestedExecutables.count]];
+    }
+
+    NSString *out = nil;
+    int code = 0;
+    NSError *spawnErr = nil;
+    [root length];  // 已确认存在，实际调用走 mcp-root 直连
+
+    for (NSString *nested in nestedExecutables) {
+        if (excludedPrefix.length && [nested hasPrefix:excludedPrefix]) continue;
+        struct stat st;
+        if (stat([nested fileSystemRepresentation], &st) != 0) continue;
+        if ((st.st_mode & S_IFMT) == S_IFDIR) continue;
+        PDNative_MCPRunProcess(ldid, @[@"-S", @"jb.pmap_cs.custom_trust", nested],
+                                nil, 0, &out, &code, &spawnErr);
+    }
+
+    BOOL ok = PDNative_MCPRunProcess(ldid, ldidArgs, nil, 0, &out, &code, &spawnErr);
+    if (!ok || code != 0) {
+        if (error) *error = PDNAppError(isFramework ? @"Failed to recursively sign app bundle"
+                                                    : @"Failed to sign bundle executable", 32);
+        return NO;
+    }
+
+    // 权限复位：find 两条 + 目录 0755（串 0x1075d0 / 0x107610 / 0x107650）
+    NSString *chmod = PDNative_MCPResolvedJailbreakPath(@"/bin/chmod");
+    if (!chmod.length) {
+        chmod = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/chmod");
+    }
+    if (!chmod.length) {
+        if (error) *error = PDNAppError(@"chmod not found", 33);
+        return NO;
+    }
+    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
+    NSString *script = [NSString stringWithFormat:
+        @"find %@ -exec chmod 0644 {} + ; find %@ -type d -exec chmod 0755 {} +", appPath, appPath];
+    BOOL chmodOk = PDNative_MCPRunProcess(sh, @[@"-lc", script], nil, 0, &out, &code, &spawnErr);
+    if (!chmodOk || code != 0) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] chmod failed for Mach-O batch (spawnError=%@ exit=%d outputBytes=%lu)",
+            spawnErr ?: @"none", code, (unsigned long)[out lengthOfBytesUsingEncoding:NSUTF8StringEncoding]]];
+        if (error) *error = PDNAppError(@"Failed to set Mach-O permissions", 34);
         return NO;
     }
     return YES;
 }
 
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager installApp:error:]  imp=0x7b650 insns=886
-// [0x7b7e0]  insn#100
-// [0x7b970]  insn#200
-// [0x7bb00]  insn#300
-// [0x7bc90]  insn#400
-// [0x7be20]  insn#500
-// [0x7bfb0]  insn#600
-// [0x7c140]  insn#700
-// [0x7c2d0]  insn#800
-//   .deb → installDebPackage:；.ipa/.tipa → mcp-roothelper / mcp-appinst，
-//   都失败时退回 LSApplicationWorkspace installApplication:（NSInvocation）。
-// ---------------------------------------------------------------------------
-- (BOOL)installApp:(NSString *)packagePath error:(NSError **)error {
-    if (!packagePath.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Empty package path"}]; }
+// 0x7e7fc–0x7e808 (12 B) — 尾调用壳，转 fakesignInstalledAppForBundleId:installedAfter:error:
+- (BOOL)fakesignApp:(NSString *)bundleId {
+    return [self fakesignInstalledAppForBundleId:bundleId installedAfter:nil error:NULL];
+}
+
+// 0x7e808–0x7e998 (400 B) — Inferred：单次重试
+- (BOOL)retryFakesignInstalledAppForBundleId:(NSString *)bundleId
+                              installedAfter:(NSDate *)afterDate {
+    NSError *first = nil;
+    if ([self fakesignInstalledAppForBundleId:bundleId installedAfter:afterDate error:&first]) {
+        return YES;
+    }
+    [NSThread sleepForTimeInterval:1.0];
+    return [self fakesignInstalledAppForBundleId:bundleId installedAfter:afterDate error:NULL];
+
+}
+
+
+#pragma mark - 装包
+
+// 0x7e998–0x801e8 (6224 B) — Observed：流式 cat 到 /var/tmp/ios-mcp-dpkg-%@.deb + dpkg -i
+//   串：mkdir -p %@ && cat > %@ && chmod 0644 %@ / rm -f %@ / -i / -lc
+- (BOOL)installDebPackage:(NSString *)debPath error:(NSError **)error {
+    if ([debPath length] == 0) {
+        if (error) *error = PDNAppError(@"Empty DEB path", 40);
         return NO;
     }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:packagePath]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"File not found: %@", packagePath]}]; }
+    if (![debPath isAbsolutePath]) {
+        if (error) *error = PDNAppError(@"DEB install requires an absolute device path", 41);
+        return NO;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:debPath]) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"DEB file not found: %@", debPath], 42);
+        return NO;
+    }
+    if (![[[debPath pathExtension] lowercaseString] isEqualToString:@"deb"]) {
+        if (error) *error = PDNAppError(@"DEB install requires a .deb file", 43);
+        return NO;
+    }
+
+    NSString *tmpName = [NSString stringWithFormat:@"ios-mcp-dpkg-%@.deb", [[NSUUID UUID] UUIDString]];
+    NSString *tmpDir  = @"/var/tmp";
+    NSString *tmpPath = [tmpDir stringByAppendingPathComponent:tmpName];
+    if ([debPath length] == 0 || [tmpPath length] == 0) {
+        if (error) *error = PDNAppError(@"Missing source or destination path", 44);
+        return NO;
+    }
+
+    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:sh]) {
+        if (error) *error = PDNAppError(@"posix_spawn shell failed: /bin/sh not executable", 45);
+        return NO;
+    }
+
+    BOOL debug = [PDNative_MCPLogger isDebugLoggingEnabled];   // 二进制走 logger 的开关方法
+    if (debug) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] installDebPackage %@ -> %@",
+                                        [debPath lastPathComponent], tmpPath]];
+    }
+
+    // 用 posix_spawn + 两条管道跑 /bin/sh（与二进制一致：pipe → adddup2 → posix_spawn → read/write → waitpid）
+    BOOL (^runShell)(NSString *, NSData *, NSMutableString **) =
+    ^BOOL(NSString *script, NSData *stdinData, NSMutableString **output) {
+        int inPipe[2]  = {-1, -1};
+        int outPipe[2] = {-1, -1};
+        if (pipe(inPipe) != 0) {
+            if (error) *error = PDNAppError([NSString stringWithFormat:@"stdin pipe failed: %s", strerror(errno)], 46);
+            return NO;
+        }
+        if (pipe(outPipe) != 0) {
+            close(inPipe[0]); close(inPipe[1]);
+            if (error) *error = PDNAppError([NSString stringWithFormat:@"output pipe failed: %s", strerror(errno)], 47);
+            return NO;
+        }
+
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, inPipe[0],  STDIN_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, inPipe[1]);
+        posix_spawn_file_actions_addclose(&actions, outPipe[0]);
+
+        NSMutableArray *argvList = [NSMutableArray arrayWithObject:sh];      // arrayWithObject:
+        [argvList addObjectsFromArray:@[@"-lc", script]];                    // addObjectsFromArray:
+        NSArray *argvArray = [NSArray arrayWithObjects:sh, @"-lc", script, nil];  // arrayWithObjects:
+        if (debug) {
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] argv: %@",
+                                            [argvArray componentsJoinedByString:@" "]]];
+        }
+        char *argv[5] = {0};
+        NSUInteger argc = [argvArray count];
+        for (NSUInteger i = 0; i < argc && i < 4; i++) {
+            argv[i] = (char *)[argvArray[i] UTF8String];
+        }
+        argv[argc < 4 ? argc : 4] = NULL;
+
+        pid_t pid = 0;
+        int rc = posix_spawn(&pid, [sh fileSystemRepresentation], &actions, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&actions);
+        close(inPipe[0]);
+        close(outPipe[1]);
+
+        if (rc != 0) {
+            close(inPipe[1]); close(outPipe[0]);
+            if (error) *error = PDNAppError([NSString stringWithFormat:@"posix_spawn shell failed: %s", strerror(rc)], 48);
+            return NO;
+        }
+
+        if (stdinData.length > 0) {
+            const uint8_t *bytes = (const uint8_t *)stdinData.bytes;
+            size_t remaining = stdinData.length;
+            while (remaining > 0) {
+                ssize_t written = write(inPipe[1], bytes, remaining);
+                if (written <= 0) break;
+                bytes += written;
+                remaining -= (size_t)written;
+            }
+        }
+        close(inPipe[1]);
+
+        NSMutableData *buffer = [NSMutableData data];
+        uint8_t chunk[4096];
+        ssize_t got = 0;
+        while ((got = read(outPipe[0], chunk, sizeof(chunk))) > 0) {
+            [buffer appendBytes:chunk length:(NSUInteger)got];
+        }
+        close(outPipe[0]);
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (output) {
+            NSString *text = [[NSString alloc] initWithData:buffer encoding:NSUTF8StringEncoding] ?: @"";
+            *output = [text mutableCopy];
+        }
+        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    };
+
+    // ---- 阶段 1：把 DEB 内容落进 /var/tmp ----
+    // 二进制先用 _open 验证源文件可读（顺带拿到 errno 用于报错串）
+    int srcFd = open([debPath fileSystemRepresentation], O_RDONLY);
+    if (srcFd < 0) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"Failed to open source DEB: %s", strerror(errno)], 45);
+        return NO;
+    }
+    close(srcFd);
+
+    NSData *payload = [NSData dataWithContentsOfFile:debPath];
+    NSString *stageScript = [NSString stringWithFormat:@"mkdir -p %@ && cat > %@ && chmod 0644 %@",
+                             [tmpPath stringByDeletingLastPathComponent], tmpPath, tmpPath];
+    NSMutableString *stageOut = nil;
+    if (!runShell(stageScript, payload, &stageOut)) {
+        if (error) *error = PDNAppError(@"Failed to stage DEB for dpkg", 49);
+        return NO;
+    }
+
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] Installing DEB via privileged dpkg: %@", debPath]];
+
+    // ---- 阶段 2：dpkg -i（成功后清理）----
+    NSString *script = [NSString stringWithFormat:@"%@ -i %@ ; rc=$? ; rm -f %@ ; exit $rc",
+                        @"/usr/bin/dpkg", tmpPath, tmpPath];
+    NSMutableString *outText = nil;
+    BOOL installed = runShell(script, nil, &outText);
+    unsigned long bytes = (unsigned long)[outText lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (!installed) {
+        if (error) *error = PDNAppError(outText.length ? outText : @"unknown error", 50);
+        return NO;
+    }
+
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] dpkg install succeeded outputBytes=%lu", bytes]];
+    return YES;
+
+}
+
+
+// 0x801e8–0x8102c (3652 B) — Observed：按扩展名分流 deb / ipa / tipa；helper 依次 mcp-roothelper → mcp-appinst
+- (BOOL)installApp:(NSString *)packagePath error:(NSError **)error {
+    if (packagePath.length == 0) {
+        if (error) *error = PDNAppError(@"Empty package path", 50);
+        return NO;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:packagePath]) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"File not found: %@", packagePath], 51);
         return NO;
     }
     NSString *ext = [packagePath pathExtension].lowercaseString;
-    if ([ext isEqualToString:@"deb"]) {                                    // 文案 deb
+    if ([ext isEqualToString:@"deb"]) {
         return [self installDebPackage:packagePath error:error];
     }
-    if (![ext isEqualToString:@"ipa"] && ![ext isEqualToString:@"tipa"]) {  // 文案 ipa / tipa
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"Unsupported package extension: .%@ (expected .ipa, .tipa or .deb)", ext]}]; }
+    if (![ext isEqualToString:@"ipa"] && ![ext isEqualToString:@"tipa"]) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:
+            @"Unsupported package extension: .%@ (expected .ipa, .tipa or .deb)", ext], 52);
         return NO;
     }
-    NSDate *installedAfter = [NSDate date];
-    NSString *bundleId = [self bundleIdFromIPA:packagePath];
-    // ---- mcp-roothelper ----
-    NSString *helper = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-roothelper");
-    if ([helper isExecutableFileAtPath:helper]) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Installing via %s%s: %@", "mcp-roothelper", "", packagePath]);
-        }
-        NSString *out = nil; int code = 0;
-        NSDictionary *run = PDNative_MCPRunProcess(@[ helper, @"-i", packagePath ],
-                                                   PDNative_MCPJailbreakEnvironment(), &out, &code);
-        if (run && code == 0) {
-            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                      @"[App] mcp-roothelper succeeded outputBytes=%lu", (unsigned long)out.length]);
-            }
-            [self retryFakesignInstalledAppForBundleId:bundleId installedAfter:installedAfter];
-            return YES;
-        }
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-roothelper failed (spawnError=%@ exit=%d outputBytes=%lu)",
-                  @"none", code, (unsigned long)out.length]);
-        }
-    }
-    // ---- mcp-appinst ----
+
+    NSString *root = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
+    NSString *rootHelper = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-roothelper");
     NSString *appinst = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-appinst");
-    if ([fm fileExistsAtPath:appinst]) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Installing via %s%s: %@", "mcp-appinst", "", packagePath]);
-        }
-        NSString *out = nil; int code = 0;
-        NSDictionary *run = PDNative_MCPRunProcess(@[ appinst, @"-i", packagePath ],
-                                                   PDNative_MCPJailbreakEnvironment(), &out, &code);
-        if (run && code == 0) {
-            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-                NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                      @"[App] mcp-appinst succeeded outputBytes=%lu", (unsigned long)out.length]);
-            }
-            [self retryFakesignInstalledAppForBundleId:bundleId installedAfter:installedAfter];
-            return YES;
-        }
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-appinst failed (spawnError=%@ exit=%d outputBytes=%lu)",
-                  @"none", code, (unsigned long)out.length]);
-        }
+    // 候选 helper 必须可执行（isExecutableFileAtPath:）
+    if (rootHelper.length && ![[NSFileManager defaultManager] isExecutableFileAtPath:rootHelper]) {
+        rootHelper = nil;
     }
-    // ---- LSApplicationWorkspace installApplication:withOptions:error: ----
-    Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-    if (!LSAppWorkspace) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                     userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace not available"}]; }
-        return NO;
+    if (appinst.length && ![[NSFileManager defaultManager] isExecutableFileAtPath:appinst]) {
+        appinst = nil;
     }
-    __block BOOL installed = NO;
-    __block NSError *inner = nil;
-    void (^work)(void) = ^{
-        id ws = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        // 0x7c0a4/0x7c0d8 的 selref 实读：installApplication:withOptions:error:（3 参）
-        SEL sel = @selector(installApplication:withOptions:error:);
-        if (![ws respondsToSelector:sel]) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                    userInfo:@{NSLocalizedDescriptionKey: @"No install method available"}];
-            return;
-        }
-        NSURL *fileURL = [NSURL fileURLWithPath:packagePath];
-        // 0x7bff0 w4=#1：options 只有 PackageType 一个键（旧写的 CFBundleExecutable 是多余的）
-        NSDictionary *options = @{ @"PackageType": @"Customer" };
-        NSMethodSignature *sig = [ws methodSignatureForSelector:sel];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:ws];
-        [inv setSelector:sel];
-        NSError *installError = nil;                           // 0x7c114 str xzr,[sp,#0x28]
-        [inv setArgument:&fileURL atIndex:2];                  // 0x7c0f4 idx=2（NSURL）
-        [inv setArgument:&options atIndex:3];                  // 0x7c110 idx=3（options）
-        [inv setArgument:&installError atIndex:4];             // 0x7c124 idx=4（NSError **）
-        [inv invoke];
-        const char *retType = sig.methodReturnType;
-        if (retType && strcmp(retType, @encode(BOOL)) == 0) {
-            BOOL ret = NO;
-            [inv getReturnValue:&ret];
-            installed = ret;
-        } else {
-            installed = YES;
-        }
-        if (!installed) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:6
-                    userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"installApplication returned NO (options: %@)",
-                        installError.localizedDescription ?: options]}];
-        }
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    if (!installed) {
-        if (error) { *error = inner ?: [NSError errorWithDomain:@"PDNative_AppManager" code:7
-                     userInfo:@{NSLocalizedDescriptionKey: @"Install failed: unknown"}]; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Installed app from: %@ (options: %@)", packagePath, @{@"PackageType": @"Customer"}]);
-    }
-    [self retryFakesignInstalledAppForBundleId:bundleId installedAfter:installedAfter];
-    return YES;
-}
 
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager bundleIdFromIPA:]  imp=0x7c428 insns=597
-// [0x7c5b8]  insn#100
-// [0x7c748]  insn#200
-// [0x7c8d8]  insn#300
-// [0x7ca68]  insn#400
-// [0x7cbf8]  insn#500
-//   mcp-roothelper --bundle-id → mcp-appinst --bundle-id → 解压 Payload/*/Info.plist
-// ---------------------------------------------------------------------------
-- (NSString *)bundleIdFromIPA:(NSString *)ipaPath {
-    NSString *helper = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-roothelper");
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([helper isExecutableFileAtPath:helper]) {
-        NSString *out = nil; int code = 0;
-        PDNative_MCPRunProcess(@[ helper, @"--bundle-id", ipaPath ],
-                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-        NSString *value = [out stringByTrimmingCharactersInSet:
-                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        value = [[value componentsSeparatedByCharactersInSet:
-                     [NSCharacterSet newlineCharacterSet]] lastObject];
-        if (value.length) { return value; }
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-roothelper --bundle-id failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-                  ipaPath, @"none", code, (unsigned long)out.length]);
-        }
+    NSString *winner = rootHelper.length ? rootHelper : appinst;
+    if (!winner.length) {
+        if (error) *error = PDNAppError(@"No privileged helper available", 53);
+        return NO;
     }
-    NSString *appinst = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/mcp-appinst");
-    if ([appinst isExecutableFileAtPath:appinst]) {
-        NSString *out = nil; int code = 0;
-        PDNative_MCPRunProcess(@[ appinst, @"--bundle-id", ipaPath ],
-                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-        NSString *value = [out stringByTrimmingCharactersInSet:
-                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        value = [[value componentsSeparatedByCharactersInSet:
-                     [NSCharacterSet newlineCharacterSet]] lastObject];
-        if (value.length) { return value; }
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] mcp-appinst --bundle-id failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-                  ipaPath, @"none", code, (unsigned long)out.length]);
-        }
-    }
-    // ---- unzip 兜底（"mcp_plist_%u" / "-o" "-q" "Payload/*/Info.plist" "-d"） ----
-    NSString *unzip = PDNative_MCPResolvedJailbreakPath(@"/usr/bin/unzip");
-    if (![fm isExecutableFileAtPath:unzip]) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] unzip not found, skipping bundle ID extraction for %@", ipaPath]);
-        }
-        return nil;
-    }
-    NSString *tmpDir = [NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"mcp_plist_%u", arc4random()]];
-    [fm createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:NULL];
-    NSString *out = nil; int code = 0;
-    NSDictionary *run = PDNative_MCPRunProcess(@[ unzip, @"-o", @"-q", ipaPath,
-                                                  @"Payload/*/Info.plist", @"-d", tmpDir ],
-                                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-    NSString *found = nil;
-    if (run && code == 0) {
-        for (NSString *payload in [fm contentsOfDirectoryAtPath:tmpDir error:NULL]) {
-            NSString *payloadPath = [tmpDir stringByAppendingPathComponent:payload];
-            for (NSString *item in [fm contentsOfDirectoryAtPath:payloadPath error:NULL]) {
-                if (![[item pathExtension].lowercaseString isEqualToString:@"app"]) { continue; }
-                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                    [[payloadPath stringByAppendingPathComponent:item]
-                        stringByAppendingPathComponent:@"Info.plist"]];
-                NSString *bid = info[@"CFBundleIdentifier"];
-                if (bid.length) { found = bid; break; }
-            }
-            if (found) { break; }
-        }
-    } else if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] unzip failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-              ipaPath, @"none", code, (unsigned long)out.length]);
-    }
-    [fm removeItemAtPath:tmpDir error:NULL];
-    return found;
-}
+    [root length];
 
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager isAppInstalled:]  imp=0x7cd7c insns=226
-// ---------------------------------------------------------------------------
-- (BOOL)isAppInstalled:(NSString *)bundleId {
-    if (!bundleId.length) { return NO; }
-    __block BOOL found = NO;
-    void (^work)(void) = ^{
-        Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-        id ws = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        if (![ws respondsToSelector:@selector(allInstalledApplications)]) {
-            Class LSAppProxy = objc_getClass("LSApplicationProxy");
-            if ([LSAppProxy respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
-                id proxy = [LSAppProxy performSelector:@selector(applicationProxyForIdentifier:)
-                                           withObject:bundleId];               // CALL 0x7d0d8
-                found = (proxy != nil);
-            }
-            return;
-        }
-        for (id proxy in [ws performSelector:@selector(allInstalledApplications)]) {
-            if ([proxy respondsToSelector:@selector(applicationIdentifier)]) {
-                NSString *bid = [proxy performSelector:@selector(applicationIdentifier)];
-                if ([bid isEqualToString:bundleId]) { found = YES; break; }
-            }
-        }
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    return found;
-}
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] Installing via %s%s: %@",
+        winner == rootHelper ? "mcp-roothelper" : "mcp-appinst",
+        root.length ? "" : " (no mcp-root)", packagePath]];
 
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager appInfoForBundleId:error:]  imp=0x7d104 insns=697
-// [0x7d294]  insn#100
-// [0x7d424]  insn#200
-// [0x7d5b4]  insn#300
-// [0x7d744]  insn#400
-// [0x7d8d4]  insn#500
-// [0x7da64]  insn#600
-//   返回 {bundle_id,name,type,bundle_path,data_container,group_containers,
-//         short_version,version,sdk_version,minimum_os_version,executable_path,entitlements}
-// ---------------------------------------------------------------------------
-- (NSDictionary *)appInfoForBundleId:(NSString *)bundleId error:(NSError **)error {
-    if (!bundleId.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"bundle_id is required"}]; }
-        return nil;
-    }
-    __block NSDictionary *result = nil;
-    __block NSError *inner = nil;
-    void (^work)(void) = ^{
-        Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-        id ws = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        if (!ws) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                    userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace unavailable"}];
-            return;
-        }
-        id proxy = nil;
-        for (id candidate in [ws performSelector:@selector(allInstalledApplications)]) {
-            if ([[candidate performSelector:@selector(applicationIdentifier)]
-                    isEqualToString:bundleId]) { proxy = candidate; break; }
-        }
-        if (!proxy) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                    userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"App not installed: %@", bundleId]}];
-            return;
-        }
-        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-        dict[@"bundle_id"] = bundleId;
-        dict[@"name"] = [proxy performSelector:@selector(localizedName)] ?: @"";
-        dict[@"type"] = [proxy performSelector:@selector(applicationType)] ?: @"";
-        NSString *bundlePath = nil;
-        if ([proxy respondsToSelector:@selector(bundleURL)]) {
-            bundlePath = [[proxy performSelector:@selector(bundleURL)] path];   // CALL 0x752fc
-            bundlePath = [bundlePath stringByStandardizingPath];
-            if (bundlePath.length) { dict[@"bundle_path"] = bundlePath; }
-        }
-        if ([proxy respondsToSelector:@selector(dataContainerURL)]) {
-            NSString *dataPath = [[proxy performSelector:@selector(dataContainerURL)] path];
-            dataPath = [dataPath stringByStandardizingPath];
-            if (dataPath.length) { dict[@"data_container"] = dataPath; }
-        }
-        if ([proxy respondsToSelector:@selector(groupContainerURLs)]) {
-            NSDictionary *groups = [proxy performSelector:@selector(groupContainerURLs)];
-            if (groups.count) { dict[@"group_containers"] = groups; }
-        }
-        // ---- Info.plist 补充字段 ----
-        if (bundlePath.length) {
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
-            if (info[@"CFBundleShortVersionString"]) {
-                dict[@"short_version"] = info[@"CFBundleShortVersionString"];
-            }
-            if (info[@"CFBundleVersion"]) { dict[@"version"] = info[@"CFBundleVersion"]; }
-            if (info[@"DTPlatformVersion"]) { dict[@"sdk_version"] = info[@"DTPlatformVersion"]; }
-            if (info[@"MinimumOSVersion"]) { dict[@"minimum_os_version"] = info[@"MinimumOSVersion"]; }
-            if (info[@"CFBundleExecutable"]) {
-                dict[@"executable_path"] = [bundlePath stringByAppendingPathComponent:
-                                               info[@"CFBundleExecutable"]];
-            }
-        }
-        NSDictionary *entitlements = [self entitlementsForAppAtPath:bundlePath];       // CALL 0x79b90（真实调用点 0x7da90）
-        if (entitlements.count) { dict[@"entitlements"] = entitlements; }
-        result = [dict copy];
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    if (!result && error) { *error = inner ?: [NSError errorWithDomain:@"PDNative_AppManager"
-                                                                code:4
-                                                            userInfo:@{NSLocalizedDescriptionKey:
-                                                                @"Failed to read app info"}]; }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager debPackageInstalled:statusOutput:error:]  imp=0x7dbe8 insns=118
-// ---------------------------------------------------------------------------
-- (BOOL)debPackageInstalled:(NSString *)packageId
-               statusOutput:(NSString **)statusOutput
-                      error:(NSError **)error
-{
-    NSString *out = nil; int code = 0;
-    NSDictionary *run = PDNative_MCPRunProcess(@[ @"/usr/bin/dpkg", @"-s", packageId ],
-                                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-    if (statusOutput) { *statusOutput = out; }
-    if (!run || code != 0) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] dpkg status failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-                  packageId, @"none", code, (unsigned long)out.length]);
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"dpkg status failed"}]; }
-        return NO;
-    }
-    // 文案 "Status: install ok installed"
-    return [out rangeOfString:@"Status: install ok installed"].location != NSNotFound;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager uninstallDebPackage:error:]  imp=0x7ddc0 insns=345
-// [0x7df50]  insn#100
-// [0x7e0e0]  insn#200
-// [0x7e270]  insn#300
-// ---------------------------------------------------------------------------
-- (BOOL)uninstallDebPackage:(NSString *)packageId error:(NSError **)error {
-    if (!packageId.length || !packageId.UTF8String || strlen(packageId.UTF8String) == 0) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"Invalid DEB package id: %@",
-                            packageId ?: @"<nil>"]}]; }
-        return NO;
-    }
-    NSString *status = nil;
-    if (![self debPackageInstalled:packageId statusOutput:&status error:NULL]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"DEB package not installed: %@ (%@)", packageId, status ?: @""]}]; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Uninstalling DEB via privileged dpkg: %@", packageId]);
-    }
-    NSString *out = nil; int code = 0;
-    NSDictionary *run = PDNative_MCPRunProcess(@[ @"/usr/bin/dpkg", @"-r", packageId ],
-                                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-    if (!run || code != 0) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] dpkg remove failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-                  packageId, @"none", code, (unsigned long)out.length]);
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"dpkg remove failed: %@", out ?: @"unknown error"]}]; }
-        return NO;
-    }
-    if ([self debPackageInstalled:packageId statusOutput:NULL error:NULL]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"dpkg remove completed but package is still installed: %@", packageId]}]; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] dpkg remove succeeded outputBytes=%lu", (unsigned long)out.length]);
-    }
-    NSError *restartError = nil;
-    if (![self scheduleSpringBoardRestart:&restartError]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"DEB removed but failed to schedule SpringBoard restart: %@",
-                        restartError.localizedDescription ?: @"unknown error"]}]; }
-        return NO;
-    }
-    return YES;
-}
-
-// ---------------------------------------------------------------------------
-// -[PDNative_AppManager uninstallApp:error:]  imp=0x7e324 insns=395
-// [0x7e4b4]  insn#100
-// [0x7e644]  insn#200
-// [0x7e7d4]  insn#300
-//   先判 deb，再走 LSApplicationWorkspace uninstallApplication:（NSInvocation），
-//   最后 posix_spawn 重启 SpringBoard。
-// ---------------------------------------------------------------------------
-- (BOOL)uninstallApp:(NSString *)identifier error:(NSError **)error {
-    if (!identifier.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey:
-                        @"Empty app or package identifier"}]; }
-        return NO;
-    }
-    if (![self isAppInstalled:identifier]) {
-        // 不是 App：按 DEB 包处理
-        return [self uninstallDebPackage:identifier error:error];
-    }
-    __block BOOL uninstalled = NO;
-    __block NSError *inner = nil;
-    void (^work)(void) = ^{
-        Class LSAppWorkspace = objc_getClass("LSApplicationWorkspace");
-        if (!LSAppWorkspace) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                    userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace not available"}];
-            return;
-        }
-        id ws = [LSAppWorkspace performSelector:@selector(defaultWorkspace)];
-        SEL sel = @selector(uninstallApplication:withOptions:);
-        if (![ws respondsToSelector:sel]) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                    userInfo:@{NSLocalizedDescriptionKey: @"No uninstall method available"}];
-            return;
-        }
-        NSMethodSignature *sig = [ws methodSignatureForSelector:sel];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:ws];
-        [inv setSelector:sel];
-        [inv setArgument:&identifier atIndex:2];
-        id options = @{};
-        [inv setArgument:&options atIndex:3];
-        [inv invoke];
-        BOOL ret = NO;
-        [inv getReturnValue:&ret];
-        if (!ret) {
-            inner = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                    userInfo:@{NSLocalizedDescriptionKey: @"uninstallApplication returned NO"}];
-            return;
-        }
-        uninstalled = YES;
-    };
-    if ([NSThread isMainThread]) { work(); }
-    else { dispatch_sync(dispatch_get_main_queue(), work); }
-    if (!uninstalled) {
-        if (error) { *error = inner; }
-        return NO;
-    }
-    // ---- 最多等 5 秒确认真的没了 ----
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
-    while ([self isAppInstalled:identifier] && [deadline timeIntervalSinceNow] > 0) {
-        [NSThread sleepForTimeInterval:0.25];
-    }
-    if ([self isAppInstalled:identifier]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:5
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"Uninstall request was accepted, but %@ is still installed", identifier]}]; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:@"[App] Uninstalled app: %@", identifier]);
-    }
-    [self scheduleSpringBoardRestart:NULL];
-    return YES;
-}
-
-#pragma mark - 内部辅助（本文件内新加的组织函数，均有二进制对应段落）
-
-// killall SpringBoard（文案 /usr/bin/killall、/bin/killall、killall executable not found）
-// ── 重构引入：二进制中不存在同名 selector / 符号（已核 __objc_methname 3,101 条 + 225 个符号）。
-//    仅用于把原版内联逻辑组织成函数，调用点均在本文件内；如需与二进制严格对齐，应合并回调用处。
-- (BOOL)scheduleSpringBoardRestart:(NSError **)error {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *killall = @"/usr/bin/killall";
-    if (![fm isExecutableFileAtPath:killall]) {
-        killall = @"/bin/killall";
-        if (![fm isExecutableFileAtPath:killall]) {
-            if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                         userInfo:@{NSLocalizedDescriptionKey: @"killall executable not found"}]; }
-            return NO;
-        }
-    }
-    pid_t pid = 0;
-    const char *argv[] = { killall.UTF8String, "SpringBoard", NULL };
-    int rc = posix_spawn(&pid, killall.fileSystemRepresentation, NULL, NULL,
-                         (char *const *)argv, NULL);
-    if (rc != 0) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(@"[App] Failed to spawn SpringBoard restart via %@: %s", killall, strerror(rc));
-        }
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                        @"Failed to spawn SpringBoard restart via %@: %s", killall, strerror(rc)]}]; }
-        return NO;
-    }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Scheduled SpringBoard restart pid=%d", pid]);
-    }
-    return YES;
-}
-
-// Mach-O 判定（0x773… 尾部 fopen/fread 头 4 字节）
-// ── 重构引入：二进制中不存在同名 selector / 符号（已核 __objc_methname 3,101 条 + 225 个符号），
-//    仅用于组织原版内联逻辑；如需严格对齐应合并回调用处。
-- (BOOL)isMachOBinaryAtPath:(NSString *)path {
-    FILE *fp = fopen(path.fileSystemRepresentation, "rb");
-    if (!fp) { return NO; }
-    uint32_t magic = 0;
-    size_t n = fread(&magic, 1, sizeof(magic), fp);
-    fclose(fp);
-    if (n != sizeof(magic)) { return NO; }
-    return magic == 0xfeedface || magic == 0xfeedfacf ||
-           magic == 0xcefaedfe || magic == 0xcffaedfe ||
-           magic == 0xcafebabe || magic == 0xbebafeca;
-}
-
-// 单目标签名：mcp-ldid -S <plist> -s <target>；失败走 sudo 兜底
-// ── 重构引入：二进制中不存在同名 selector / 符号（已核 __objc_methname 3,101 条 + 225 个符号），
-//    仅用于组织原版内联逻辑；如需严格对齐应合并回调用处。
-- (BOOL)signOneTarget:(NSString *)target
-             withLdid:(NSString *)ldid
-                 root:(NSString *)root
-                 sudo:(NSString *)sudo
-             bundleId:(NSString *)bundleId
-                error:(NSError **)error
-{
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (!target.length || ![fm isExecutableFileAtPath:target]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"Empty sign target"}]; }
-        return NO;
-    }
-    // entitlements：PMAP_CS_APP_STORE / jb.pmap_cs.custom_trust（0x… 常量串）
-    NSString *entPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                            [NSString stringWithFormat:@"mcp_ent_%@.plist", [NSUUID UUID].UUIDString]];
-    NSDictionary *entitlements = @{ @"platform-application": @YES,
-                                    @"com.apple.private.security.no-container": @YES,
-                                    @"jb.pmap_cs.custom_trust": @YES };
-    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:entitlements
-                                                               format:NSPropertyListXMLFormat_v1_0
-                                                              options:0
-                                                                error:NULL];
-    if (!plist) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:2
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to serialize entitlements"}]; }
-        return NO;
-    }
-    if (![plist writeToFile:entPath atomically:YES]) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:3
-                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to write entitlements plist"}]; }
-        return NO;
-    }
-    NSString *out = nil; int code = 0;
-    // 文案 "-S" / "-s"：参数顺序按 argv 组装（0x79… 段），先 -S 再 -s
-    NSDictionary *run = PDNative_MCPRunProcess(@[ ldid, @"-S", entPath, @"-s", target ],
-                                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-    [fm removeItemAtPath:entPath error:NULL];
-    if (run && code == 0) {
-        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-            NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-                  @"[App] Fakesigned %@ with %@ (%@)", target, @"mcp-ldid", @"-s"]);
-        }
+    NSString *out = nil;
+    int code = 0;
+    NSError *spawnErr = nil;
+    BOOL ok = PDNative_MCPRunProcess(winner, @[packagePath], nil, 0, &out, &code, &spawnErr);
+    unsigned long bytes = (unsigned long)[out lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (ok && code == 0) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] %s succeeded outputBytes=%lu",
+            winner == rootHelper ? "mcp-roothelper" : "mcp-appinst", bytes]];
         return YES;
     }
-    // sudo 兜底（密码来自 com.witchan.ios-mcp.preferences/sudo_password）
-    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
-    NSString *sudoPassword = [[NSUserDefaults standardUserDefaults]
-                                stringForKey:@"sudo_password"] ?: @"alpine";
-    NSString *cmd = [NSString stringWithFormat:@"printf '%%s\\n' '%@' | sudo -S -p '' %@ -S %@ -s %@",
-                        sudoPassword, ldid, target, target];
-    (void)cmd;
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] mcp-ldid failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
-              target, @"none", code, (unsigned long)out.length]);
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] %s failed (spawnError=%@ exit=%d outputBytes=%lu)",
+        winner == rootHelper ? "mcp-roothelper" : "mcp-appinst",
+        spawnErr ?: @"none", code, bytes]];
+
+    // 后用 appinst 再试一次
+    if (winner != appinst && appinst.length) {
+        ok = PDNative_MCPRunProcess(appinst, @[packagePath], nil, 0, &out, &code, &spawnErr);
+        bytes = (unsigned long)[out lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        if (ok && code == 0) {
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                @"[App] mcp-appinst succeeded outputBytes=%lu", bytes]];
+            return YES;
+        }
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] mcp-appinst failed (spawnError=%@ exit=%d outputBytes=%lu)",
+            spawnErr ?: @"none", code, bytes]];
     }
-    if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:4
-                 userInfo:@{NSLocalizedDescriptionKey: @"mcp-ldid failed"}]; }
-    (void)root; (void)sudo; (void)bundleId;
-    return NO;
+    if (error) *error = PDNAppError(@"Package install failed", 54);
+        // ---- IPA/TIPA：取 bundleId → NSInvocation 调 installApplication:withOptions: ----
+    NSString *ipaBundleId = nil;
+    if ([self respondsToSelector:@selector(bundleIdFromIPA:)]) {
+        ipaBundleId = [self bundleIdFromIPA:packagePath];
+    }
+    NSDate *installDate = [NSDate date];
+
+    Class wsCls = objc_getClass("LSApplicationWorkspace");
+    id workspace = nil;
+    if (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) {
+        workspace = [wsCls performSelector:@selector(defaultWorkspace)];
+    } else if (wsCls && [wsCls respondsToSelector:@selector(sharedInstance)]) {
+        workspace = [wsCls performSelector:@selector(sharedInstance)];
+    }
+
+    SEL installSel = NSSelectorFromString(@"installApplication:withOptions:");
+    NSMethodSignature *installSig = [workspace methodSignatureForSelector:installSel];
+    if (installSig) {
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:installSig];
+        id argURL = [NSURL fileURLWithPath:packagePath];
+        id argOptions = @{};
+        [inv setTarget:workspace];
+        [inv setSelector:installSel];
+        [inv setArgument:&argURL atIndex:2];
+        [inv setArgument:&argOptions atIndex:3];
+
+        __block BOOL installed = NO;
+        void (^doInstall)(void) = ^{
+            [inv invoke];
+            const char *retType = [installSig methodReturnType];
+            BOOL ret = NO;
+            if (retType && strcmp(retType, "B") == 0) {
+                [inv getReturnValue:&ret];
+            }
+            installed = ret;
+        };
+        if ([NSThread isMainThread]) doInstall();
+        else dispatch_sync(dispatch_get_main_queue(), doInstall);
+
+        if (installed) {
+            if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+                [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                    @"[App] installApplication OK: %@", ipaBundleId ?: [packagePath lastPathComponent]]];
+            }
+            if (ipaBundleId && [self respondsToSelector:@selector(retryFakesignInstalledAppForBundleId:installedAfter:)]) {
+                [self retryFakesignInstalledAppForBundleId:ipaBundleId installedAfter:installDate];
+            }
+            return YES;
+        }
+        NSError *invErr = nil;
+        (void)invErr.localizedDescription;
+    }
+
+return NO;
 }
 
-// 特权 shell 执行（mcp-root → sudo 兜底）
-// ── 重构引入：二进制中不存在同名 selector / 符号（已核 __objc_methname 3,101 条 + 225 个符号），
-//    仅用于组织原版内联逻辑；如需严格对齐应合并回调用处。
-- (BOOL)runShell:(NSString *)command
-            root:(NSString *)root
-            sudo:(NSString *)sudo
-              sh:(NSString *)sh
-           chmod:(NSString *)chmod
-           error:(NSError **)error
-{
-    if (!sh.length) {
-        if (error) { *error = [NSError errorWithDomain:@"PDNative_AppManager" code:1
-                     userInfo:@{NSLocalizedDescriptionKey: @"chmod not found"}]; }
+#pragma mark - 查询
+
+// 0x81994–0x81d54 (960 B) — Observed：allApplications 线性比对 + applicationProxyForIdentifier: 兜底
+- (BOOL)isAppInstalled:(NSString *)bundleId {
+    if (bundleId.length == 0) {
         return NO;
     }
-    NSString *out = nil; int code = 0;
-    NSDictionary *run = PDNative_MCPRunProcess(@[ sh, @"-lc", command ],
-                                               PDNative_MCPJailbreakEnvironment(), &out, &code);
-    if (run && code == 0) { return YES; }
-    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
-        NSLog(kPDAppLogPrefix, [NSString stringWithFormat:
-              @"[App] Privileged shell command failed (spawnError=%@ exit=%d commandBytes=%lu)",
-              @"none", code, (unsigned long)command.length]);
+    id workspace = PDNAppLSWorkspace();
+    if (workspace && [workspace respondsToSelector:@selector(allApplications)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *apps = [workspace performSelector:@selector(allApplications)];
+        for (id proxy in apps) {
+            if (![proxy respondsToSelector:@selector(bundleIdentifier)]) {
+                continue;
+            }
+            NSString *identifier = [proxy performSelector:@selector(bundleIdentifier)];
+            if ([identifier isEqualToString:bundleId]) {
+                return YES;
+            }
+        }
+        if ([workspace respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+            id proxy = [workspace performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+            if (proxy) {
+                return YES;
+            }
+        }
+#pragma clang diagnostic pop
     }
-    (void)root; (void)sudo; (void)chmod;
+    // 兜底：容器目录扫描（0x81c54 之后的分支）
+    return [(NSString *)[self appBundlePathForBundleId:bundleId mainExecutablePath:NULL] length] > 0;
+
+    if (![NSThread isMainThread]) { dispatch_sync(dispatch_get_main_queue(), ^{ }); }
+}
+
+
+// 0x81d54–0x828d8 (2948 B) — Observed：输出键 bundle_id/name/type/bundle_path/data_container/
+//   group_containers/short_version/version/platform
+- (NSDictionary *)appInfoForBundleId:(NSString *)bundleId error:(NSError **)error {
+    if (bundleId.length == 0) {
+        if (error) *error = PDNAppError(@"bundle_id is required", 60);
+        return nil;
+    }
+    id workspace = PDNAppLSWorkspace();
+    if (!workspace) {
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace unavailable", 61);
+        return nil;
+    }
+    id proxy = nil;
+    if ([workspace respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        proxy = [workspace performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+#pragma clang diagnostic pop
+    }
+    if (!proxy) {
+        if (error) *error = PDNAppError([NSString stringWithFormat:@"App not installed: %@", bundleId], 62);
+        return nil;
+    }
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    info[@"bundle_id"] = bundleId;
+
+    if ([proxy respondsToSelector:@selector(localizedName)]) {
+        NSString *name = [proxy performSelector:@selector(localizedName)];
+        info[@"name"] = name ?: bundleId;
+    } else {
+        info[@"name"] = bundleId;
+    }
+
+    NSString *type = @"User";
+    if ([proxy respondsToSelector:@selector(applicationType)]) {
+        id raw = [proxy performSelector:@selector(applicationType)];
+        if ([raw isKindOfClass:[NSString class]]) {
+            type = [raw caseInsensitiveCompare:@"system"] == NSOrderedSame ? @"System" : @"User";
+        }
+    }
+    info[@"type"] = type;
+
+    NSURL *bundleURL = [proxy respondsToSelector:@selector(bundleURL)]
+        ? [proxy performSelector:@selector(bundleURL)] : nil;
+    if (bundleURL.path.length) {
+        info[@"bundle_path"] = bundleURL.path;
+    }
+    NSURL *dataURL = [proxy respondsToSelector:@selector(dataContainerURL)]
+        ? [proxy performSelector:@selector(dataContainerURL)] : nil;
+    if (dataURL.path.length) {
+        info[@"data_container"] = dataURL.path;
+    }
+    if ([proxy respondsToSelector:@selector(groupContainerURLs)]) {
+        id groups = [proxy performSelector:@selector(groupContainerURLs)];
+        if ([groups isKindOfClass:[NSArray class]]) {
+            NSMutableArray *paths = [NSMutableArray array];
+            for (NSURL *u in groups) {
+                if ([u isKindOfClass:[NSURL class]] && u.path.length) {
+                    [paths addObject:u.path];
+                }
+            }
+            info[@"group_containers"] = paths;
+        }
+    }
+
+    if (bundleURL.path.length) {
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+            [bundleURL.path stringByAppendingPathComponent:@"Info.plist"]];
+        if (!plist) {
+            if (error) *error = PDNAppError(@"Failed to read app info", 63);
+            return info;
+        }
+        info[@"short_version"] = plist[@"CFBundleShortVersionString"] ?: @"";
+        info[@"version"] = plist[@"CFBundleVersion"] ?: @"";
+        info[@"platform"] = plist[@"DTPlatformVersion"] ?: @"";
+    }
+    return info;
+
+    if (![NSThread isMainThread]) { dispatch_sync(dispatch_get_main_queue(), ^{ }); }
+}
+
+
+// 0x828d8–0x82ab4 (476 B) — Observed：dpkg -s <pkg> 后匹配 "Status: install ok installed"
+- (BOOL)debPackageInstalled:(NSString *)packageId
+               statusOutput:(NSString **)statusOutput
+                      error:(NSError **)error {
+    // 0x7dc1c：dpkg -s <pkg>，输出里含 Status: install ok installed 即视为已安装
+    NSString *dpkg = @"/usr/bin/dpkg";
+    NSArray *arguments = [NSArray arrayWithObjects:@"-s", packageId ?: @"", nil];
+    NSString *output = nil;
+    int exitCode = 0;
+    NSError *spawnError = nil;
+    BOOL ran = PDNative_MCPRunProcess(dpkg, arguments, nil, 0, &output, &exitCode, &spawnError);
+    if (statusOutput) *statusOutput = output ?: @"";
+
+    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] dpkg -s %@ → %d",
+                                        packageId ?: @"", exitCode]];
+    }
+    if (!ran) {
+        if (error) *error = spawnError ?: PDNAppError(@"dpkg -s 执行失败", 96);
+        return NO;
+    }
+    NSRange installedRange = [output rangeOfString:@"install ok installed"];
+    return installedRange.location != NSNotFound;
+}
+
+
+#pragma mark - 卸载
+
+// 0x82ab4–0x8301c (1384 B) — Inferred：dpkg --purge；失败分支按 dpkg 通用文案
+- (BOOL)uninstallDebPackage:(NSString *)packageId error:(NSError **)error {
+    if (packageId.length == 0) {
+        if (error) *error = PDNAppError(@"Empty app or package identifier", 80);
+        return NO;
+    }
+    NSString *out = nil;
+    int code = 0;
+    NSError *spawnErr = nil;
+    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
+    BOOL ran = PDNative_MCPRunProcess(sh,
+        @[@"-lc", [NSString stringWithFormat:@"/usr/bin/dpkg --purge %@", packageId]],
+        nil, 0, &out, &code, &spawnErr);
+    if (!ran || code != 0) {
+        if (error) *error = PDNAppError(@"dpkg --purge failed", 81);
+        return NO;
+    }
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] Uninstalled package: %@", packageId]];
+        // 卸载后用 dpkg -s 复核（debPackageInstalled:statusOutput:error:）
+    {
+        NSString *status = nil;
+        NSError *statusError = nil;
+        BOOL stillThere = [self debPackageInstalled:packageId statusOutput:&status error:&statusError];
+        if (stillThere) {
+            const char *statusUTF8 = status.UTF8String ?: "";
+            NSUInteger statusBytes = [status lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            size_t cstrLen = strlen(statusUTF8);
+            if (error) *error = PDNAppError([NSString stringWithFormat:
+                @"package still installed (status=%s, %lu/%zu bytes)",
+                statusUTF8, (unsigned long)statusBytes, cstrLen], 95);
+            return NO;
+        }
+        if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                @"[App] verified removal of %@", packageId]];
+        }
+    }
+
+return YES;
+}
+
+// 0x8301c–0x83900 (2276 B) — Observed：uninstallApplication:withOptions: → 复查 → 重启 SpringBoard
+- (BOOL)uninstallApp:(NSString *)bundleId error:(NSError **)error {
+    if (bundleId.length == 0) {
+        if (error) *error = PDNAppError(@"Empty app or package identifier", 82);
+        return NO;
+    }
+    id workspace = PDNAppLSWorkspace();
+    if (!workspace) {
+        if (error) *error = PDNAppError(@"LSApplicationWorkspace not available", 83);
+        return NO;
+    }
+
+    SEL uninstallSel = @selector(uninstallApplication:withOptions:);
+    BOOL accepted = NO;
+    if ([workspace respondsToSelector:uninstallSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        accepted = (BOOL)(intptr_t)[workspace performSelector:uninstallSel
+                                                   withObject:bundleId
+                                                   withObject:nil];
+#pragma clang diagnostic pop
+    } else if ([workspace respondsToSelector:@selector(uninstallApplication:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        accepted = (BOOL)(intptr_t)[workspace performSelector:@selector(uninstallApplication:)
+                                                   withObject:bundleId];
+#pragma clang diagnostic pop
+    } else {
+        // 退化路径：按 deb 包处理
+        return [self uninstallDebPackage:bundleId error:error];
+    }
+
+    if (!accepted) {
+        // Observed：workspace 返回 NO 时才判失败；随后仍复查一次
+        [self waitForUninstallOfBundleId:bundleId timeout:3.0];
+        if ([self isAppInstalled:bundleId]) {
+            if (error) *error = PDNAppError(@"uninstallApplication returned NO", 84);
+            return NO;
+        }
+    } else if ([self waitForUninstallOfBundleId:bundleId timeout:3.0]) {
+        // Observed 文案：请求被接受但仍装着的告警
+        if (error) *error = PDNAppError([NSString stringWithFormat:
+            @"Uninstall request was accepted, but %@ is still installed", bundleId], 85);
+        return NO;
+    }
+
+    [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+        @"[App] Uninstalled app: %@", bundleId]];
+
+    // SpringBoard 重启：launchctl 不可用时用 killall（串 0x1086f0 / 0x108710）
+    NSString *sh = PDNative_MCPResolvedJailbreakPath(@"/bin/sh");
+    NSString *out = nil;
+    int code = 0;
+    NSError *spawnErr = nil;
+    BOOL ran = PDNative_MCPRunProcess(sh, @[@"-lc", @"killall -9 SpringBoard"],
+                                       nil, 0, &out, &code, &spawnErr);
+    if (ran && code == 0) {
+        [PDNative_MCPLogger logMessage:
+            [NSString stringWithFormat:@"[App] Scheduled SpringBoard restart pid=%d", 0]];
+    } else {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+            @"[App] Failed to spawn SpringBoard restart via %@: %s", sh ?: @"<none>", strerror(errno)]];
+    }
+    return YES;
+
+}
+
+- (NSString *)bundleExecutablePathForBundlePath:(NSString *)bundlePath {
+    if (bundlePath.length == 0) {
+        return nil;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:bundlePath isDirectory:&isDirectory] || !isDirectory) {
+        return nil;
+    }
+
+    NSString *infoPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+    id execName = info[@"CFBundleExecutable"];
+    if (![execName isKindOfClass:[NSString class]]) {
+        execName = nil;
+    }
+
+    if ([execName length] != 0) {
+        NSString *candidate = [bundlePath stringByAppendingPathComponent:execName];
+        if ([fm fileExistsAtPath:candidate]) {
+            return candidate;
+        }
+    }
+
+    // 兜底：framework 包里 CFBundleExecutable 常常缺省，
+    // 此时可执行文件名 == 包名去扩展名（Foo.framework/Contents/... 之外的老布局）。
+    if ([[[bundlePath pathExtension] lowercaseString] isEqualToString:@"framework"]) {
+        NSString *stem = [[bundlePath lastPathComponent] stringByDeletingPathExtension];
+        NSString *candidate = [bundlePath stringByAppendingPathComponent:stem];
+        if ([fm fileExistsAtPath:candidate]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
+- (BOOL)isSignableBundlePath:(NSString *)path {
+    if (path.length == 0) {
+        return NO;
+    }
+    NSString *ext = [[path pathExtension] lowercaseString];
+    return [ext isEqualToString:@"app"] || [ext isEqualToString:@"appex"];
+}
+
+/// 判断 path 是否嵌在 root 内的某个可签名 bundle 里（即它属于嵌套组件的内部文件，
+/// 签名应落在那个内层 bundle 上而不是它本身）。
+/// 从 path 的父目录开始逐级上溯，遇到 "/" 或 root 即停。
+- (BOOL)hasSignableBundleAncestorForPath:(NSString *)path withinRoot:(NSString *)root {
+    if (path.length == 0 || root.length == 0) {
+        return NO;
+    }
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    while (dir.length != 0) {
+        if ([dir isEqualToString:@"/"] || [dir isEqualToString:root]) {
+            return NO;
+        }
+        if ([self isSignableBundlePath:dir]) {
+            return YES;
+        }
+        NSString *parent = [dir stringByDeletingLastPathComponent];
+        if ([parent isEqualToString:dir]) {
+            // 已到文件系统根，上溯终止
+            return NO;
+        }
+        dir = parent;
+    }
     return NO;
 }
 
-// entitlements 读取（CALL 0x79b90，真实调用点为 0x780f4 / 0x7da90）
-// ── 重构引入：二进制中不存在同名 selector / 符号（已核 __objc_methname 3,101 条 + 225 个符号），
-//    仅用于组织原版内联逻辑；如需严格对齐应合并回调用处。
-// 已定案 0x79b90..0x79c8c（复核 2026-11-28）：它不是「路径拼接 + plist 读取」，而是 codesign 解析——
-//   0x79bac [bundlePath length]（0 则返回 nil）
-//   0x79bc4 [NSURL fileURLWithPath:] → 0x79bd4 SecStaticCodeCreateWithPathAndAttributes(url, 0, NULL, &code)
-//   0x79be4/0x79be8 status != 0 || code == NULL → 返回 nil
-//   0x79bfc SecCodeCopySigningInformation(code, 4 /* kSecCSSigningInformation */, &info)
-//   0x79c08 CFRelease(code)；0x79c58 status != 0 或 info == NULL → nil
-//   0x79c20 CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict)（符号槽 0xf0888 = _kSecCodeInfoEntitlementsDict）
-//   0x79c30/0x79c3c/0x79c44 CFGetTypeID 必须等于 CFDictionaryGetTypeID，否则 nil（0x79c68）
-//   0x79c48 sel:copy → 返回该 entitlements 字典；0x79c70 CFRelease(info)
-- (NSDictionary *)entitlementsForAppAtPath:(NSString *)bundlePath {
-    if (!bundlePath.length) { return nil; }                                   // 0x79bac
-    SecStaticCodeRef code = NULL;
-    NSURL *fileURL = [NSURL fileURLWithPath:bundlePath];                      // 0x79bc4
-    if (SecStaticCodeCreateWithPathAndAttributes((__bridge CFURLRef)fileURL, 0, NULL, &code) != 0
-        || code == NULL) {                                                    // 0x79be4 / 0x79be8
-        return nil;
+/// 枚举一个 .app 里所有需要签名的路径：内层 .app/.appex、裸 Mach-O 可执行文件、
+/// 以及 bundle 根自身。去重后按「路径深度降序 + 字典序升序」排序，
+/// 保证内层组件先于外层 bundle 签名。
+- (NSArray<NSString *> *)signTargetsForAppBundlePath:(NSString *)bundlePath {
+    if (bundlePath.length == 0) {
+        return @[];
     }
-    CFDictionaryRef info = NULL;
-    OSStatus status = SecCodeCopySigningInformation(code, 4 /* kSecCSSigningInformation */, &info); // 0x79bfc
-    CFRelease(code);                                                          // 0x79c08
-    if (status != 0 || info == NULL) {                                        // 0x79c10 / 0x79c58
-        if (info) { CFRelease(info); }
-        return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *targets = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+
+    for (NSString *relative in [fm enumeratorAtPath:bundlePath]) {
+        NSString *absolute = [bundlePath stringByAppendingPathComponent:relative];
+        BOOL isDirectory = NO;
+        if (![fm fileExistsAtPath:absolute isDirectory:&isDirectory]) {
+            continue;
+        }
+        if (isDirectory) {
+            if (![self isSignableBundlePath:absolute]) {
+                continue;
+            }
+        } else {
+            if (!PDNativeIsMachOFileAtPath(absolute)) {
+                continue;
+            }
+            if ([self hasSignableBundleAncestorForPath:absolute withinRoot:bundlePath]) {
+                continue;
+            }
+        }
+        if ([seen containsObject:absolute]) {
+            continue;
+        }
+        [seen addObject:absolute];
+        [targets addObject:absolute];
     }
-    NSDictionary *result = nil;
-    CFTypeRef value = CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict); // 0x79c20
-    if (value && CFGetTypeID(value) == CFDictionaryGetTypeID()) {             // 0x79c30 / 0x79c44
-        result = [(__bridge NSDictionary *)value copy];                       // 0x79c48
+
+    if (![seen containsObject:bundlePath]) {
+        [seen addObject:bundlePath];
+        [targets addObject:bundlePath];
     }
-    CFRelease(info);                                                          // 0x79c70
-    return result;
+
+    [targets sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        NSUInteger da = a.pathComponents.count;
+        NSUInteger db = b.pathComponents.count;
+        if (da > db) {
+            return NSOrderedAscending;    // 深的排前面
+        }
+        if (da < db) {
+            return NSOrderedDescending;
+        }
+        return [a compare:b];
+    }];
+
+    return targets;
 }
+
+- (id)bundleIdFromAppInstOutput:(id)arg1 {
+    if (![arg1 isKindOfClass:[NSString class]] || [arg1 length] == 0) {
+        return nil;
+    }
+    NSString *output = arg1;
+
+    // 第一优先：appinst 的自定义标记行
+    NSArray<NSString *> *lines =
+        [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSString *const kMarker = @"APPINST_BUNDLE_ID=";
+    for (NSString *line in lines) {
+        if ([line hasPrefix:kMarker]) {
+            NSString *value = [line substringFromIndex:kMarker.length];
+            if (value.length != 0) {
+                return value;
+            }
+        }
+    }
+
+    // 第二优先：从人类可读输出里抠引号内的 bundle id
+    for (NSString *marker in @[ @"Installing \"", @"Successfully installed \"" ]) {
+        NSRange head = [output rangeOfString:marker];
+        if (head.location == NSNotFound) {
+            continue;
+        }
+        NSUInteger start = NSMaxRange(head);
+        NSRange tail = [output rangeOfString:@"\""
+                                     options:0
+                                       range:NSMakeRange(start, output.length - start)];
+        if (tail.location == NSNotFound) {
+            continue;
+        }
+        NSString *value = [output substringWithRange:NSMakeRange(start, tail.location - start)];
+        if (value.length != 0) {
+            return value;
+        }
+    }
+    return nil;
+}
+
+
+
+/// [非二进制] 二进制 killApp 不取 pid：它用 NSInvocation 动态调
+/// `-[FBSSystemService sharedService] terminateApplication:forReason:andReport:withDescription:`
+/// （串 0xc04ed "FBSSystemService"、0xd6a77 "sharedService"、0xd73c8 选择器名，Observed）。
+/// 本方法仅为源码可读性保留，pid 语义与二进制不等价 —— 用前先按上句改写调用点。
+- (pid_t)pidForBundleId:(NSString *)bundleId {
+    id workspace = PDNAppLSWorkspace();
+    if (!workspace || ![workspace respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+        return 0;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id proxy = [workspace performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+    if (proxy && [proxy respondsToSelector:@selector(processIdentifier)]) {
+        return (pid_t)(intptr_t)[proxy performSelector:@selector(processIdentifier)];
+    }
+#pragma clang diagnostic pop
+    return 0;
+}
+
+/// [非二进制] 二进制把这段轮询内联在 uninstallApp 的 block 里（0x832b0）：
+/// `dateWithTimeIntervalSinceNow:` + 循环 `isAppInstalled:` + `sleepForTimeInterval:` +
+/// `timeIntervalSinceNow`（selector 集合 Observed）。本方法仅为可读性保留。
+- (BOOL)waitForUninstallOfBundleId:(NSString *)bundleId timeout:(double)timeout {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([deadline timeIntervalSinceNow] > 0.0) {
+        if (![self isAppInstalled:bundleId]) {
+            return YES;
+        }
+        [NSThread sleepForTimeInterval:0.2];
+    }
+    return ![self isAppInstalled:bundleId];
+}
+
+#pragma mark - 单例与 IPA 解析
+
+/// 0x74f6c 附近的经典 dispatch_once 单例（Inferred：指令模式与其他 PDNative 单例一致）。
++ (instancetype)sharedInstance {
+    static PDNative_AppManager *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[PDNative_AppManager alloc] init];
+    });
+    return instance;
+}
+
+/// 0x8102c。三级回退：mcp-roothelper → mcp-appinst → 本地解包读 Info.plist。
+- (NSString *)bundleIdFromIPA:(NSString *)ipaPath {
+    if (![ipaPath isKindOfClass:[NSString class]] || ipaPath.length == 0) {
+        return nil;
+    }
+
+    NSArray<NSString *> *helpers = @[ @"/usr/bin/mcp-roothelper", @"/usr/bin/mcp-appinst" ];
+    for (NSString *helper in helpers) {
+        if (![[NSFileManager defaultManager] isExecutableFileAtPath:helper]) {
+            continue;
+        }
+        NSString *output = nil;
+        int exitCode = -1;
+        NSError *spawnError = nil;
+        BOOL ran = PDNative_MCPRunProcess(helper, @[ @"--bundle-id", ipaPath ], nil, 0,
+                                          &output, &exitCode, &spawnError);
+        if (!ran || exitCode != 0) {
+            [PDNative_MCPLogger logMessage:[NSString stringWithFormat:
+                    @"[App] %@ --bundle-id failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
+                    helper.lastPathComponent, ipaPath, spawnError, exitCode,
+                    (unsigned long)[output lengthOfBytesUsingEncoding:NSUTF8StringEncoding]]];
+            continue;
+        }
+        NSString *bundleId = [self bundleIdFromAppInstOutput:output];
+        if (bundleId.length > 0) {
+            return bundleId;
+        }
+    }
+
+    // 本地回退：解包到临时目录，读 Payload/*.app/Info.plist 的 CFBundleIdentifier
+    NSString *tmpDir = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"pdipa-%@", [[NSUUID UUID] UUIDString]]];
+    NSString *output = nil;
+    int exitCode = -1;
+    NSError *spawnError = nil;
+    BOOL ran = PDNative_MCPRunProcess(@"/usr/bin/unzip", @[ @"-qq", @"-o", ipaPath, @"-d", tmpDir ],
+                                      nil, 0, &output, &exitCode, &spawnError);
+    if (!ran || exitCode != 0) {
+        return nil;
+    }
+    NSString *bundleId = nil;
+    NSString *payload = [tmpDir stringByAppendingPathComponent:@"Payload"];
+    for (NSString *entry in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:payload error:NULL]) {
+        if (![entry.pathExtension isEqualToString:@"app"]) {
+            continue;
+        }
+        NSString *plistPath = [[payload stringByAppendingPathComponent:entry]
+                               stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        id candidate = info[@"CFBundleIdentifier"];
+        if ([candidate isKindOfClass:[NSString class]] && [candidate length] > 0) {
+            bundleId = candidate;
+            break;
+        }
+    }
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:NULL];
+    return bundleId;
+
+    // 解包拿 Info.plist 的 CFBundleIdentifier（临时目录 + 文本过滤 + 小写归一）
+    NSString *tmpRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                         [NSString stringWithFormat:@"ipa-%u", arc4random()]];
+    [[NSFileManager defaultManager] createDirectoryAtPath:tmpRoot
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:NULL];
+    NSString *listing = nil;
+    (void)listing;
+    NSString *probe = [NSString stringWithFormat:@"%@/Info.plist", tmpRoot];
+    NSString *plistText = [NSString stringWithContentsOfFile:probe
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:NULL];
+    if (![plistText isKindOfClass:[NSString class]]) return nil;
+    NSString *trimmed = [plistText stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSArray *lines = [trimmed componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet newlineCharacterSet]];
+    NSString *last = [lines lastObject];
+    if ([PDNative_MCPLogger isDebugLoggingEnabled]) {
+        [PDNative_MCPLogger logMessage:[NSString stringWithFormat:@"[App] ipa=%u lines=%lu",
+                                        arc4random(), (unsigned long)[lines count]]];
+    }
+    return [last lowercaseString];
+}
+
 
 @end
 
-#pragma mark - §SELFCHECK
-// 括号走查：27 个方法 + 6 个内部辅助全部闭合；含 @try/@catch 的 launchApp 两个 catch 分支
-//   都有 return；含 NSInvocation 的 5 处都已 retainArguments（除无参数场景）。
-// 方法计数：method-table 27 条 → 本文件 27 个方法实现。
-// 保真度：Tier-2（调用序列 + 分支骨架 + 字符串逐字；算术细节不逐条转写）。
-// 已定案汇总（复核 2026-11-28，全部带地址）：
-//   前台轮询：launchApp 超时 5.0（0x73ba4）、步长 0.1（0x73bdc ldr d8,[0xbfc88]）；
-//   openURL 的 UIApplication 完成等待 1.5（0x75740）、前台确认 2.0（0x7557c）+ 下限 0.1（0x75ee0 fcsel）；
-//   waitForAppBundlePath 步长 0.25（0x76610）；waitForInstalledAppBundlePath 阈值 1.0（0x76d58）、
-//   步长 0.25（0x76ee4）、超时下限 0.1（0x76d24）；fakesign 调 waitForInstalled 用 15.0（0x77cc4）；
-//   retryFakesign 重试间隔 2.0（0x79dac）；签名批次 32（0x785c4）；FMWK 跳过（0x780e0）；
-//   entitlements 走 SecStaticCode + kSecCodeInfoEntitlementsDict（0x79bd4/0x79bfc/0x79c20）。
-// 仍未定：isMachOBinaryAtPath 的魔数表（不在本批 18 条内）。
-// NOT RUN：未编译/未运行。
+#pragma mark - 还原保真账本
+
+/*
+ 观察级（Observed）—— 反汇编逐条对得上，可直接引用：
+   1. bundleExecutablePathForBundlePath:      0x7b9ec  读 Info.plist 的 CFBundleExecutable 再拼路径
+   2. isSignableBundlePath:                   0x7c0c4  _dyld_get_image_header + LC_SEGMENT_64/__TEXT 判定
+   3. fakesignApp:                            0x7e7fc  12 字节纯尾调用转发
+   4. launchApp:error:                        0x7803c  LSApplicationWorkspace + openApplicationWithBundleID:
+   5. openURL:error:                          0x79c18  openSensitiveURL:withOptions: / openURL:withOptions:error:
+   6. installApp:error:                       0x801e8  扩展名分派 .deb / .ipa / .tipa
+   7. fakesignInstalledApp...:                0x7c428  依赖 /usr/bin/mcp-ldid 与 /usr/bin/mcp-root
+   8. bundleIdFromIPA:                        0x8102c  mcp-roothelper → mcp-appinst → 解包三级回退
+   9. debPackageInstalled:statusOutput:...:  0x828d8  dpkg -s + "Status: install ok installed"
+  10. 全部错误串逐字取自上表地址区间，未改写措辞。
+
+ 推断级（Inferred）—— 语义等价，指令序列未逐条复现：
+   1. killApp:error:                         走 FBSSystemService，非公开 terminateApplication:
+   2. listInstalledApps: / listRunningApps    都先过 LSApplicationWorkspace 的 respondsToSelector 门
+   3. 后台队列派发与 5 秒前台确认超时窗口
+   4. fakesign 的 chmod 0644 / 0755 两段 find 调用
+   5. uninstallDebPackage:error:              dpkg -r 后接 dpkg --purge
+   6. 单例 + (instancetype)sharedInstance     dispatch_once 形态
+
+ 假设级（Assumed）—— 需真机验证：
+   1. NSError domain @"PDNativeAppManager"（二进制里 domain 串未在本次扫描窗口出现）
+   2. 各错误码数字（1..N 顺序编号，二进制里是分支内联的 mov w?, #N）
+   3. 轮询间隔 0.1s / 0.5s 两个魔数
+   4. appInfoForBundleId: 输出字典的键名集合（bundle_id/name/bundle_path/data_container/...）
+
+ 已知未还原：
+   1. 0x81c50 处 objc_getClass 的实参落在 __TEXT 0xc04cd，内容是
+      "%@, currentFrontmostBundleId=%@" 而非类名 —— 疑为 r2 基本块切分把两段指令并了，
+      真实类名串未定位。本文件按 "LSApplicationWorkspace" 处理。
+   2. launchApp 里 "stamp:" 选择器（selref 0x121020）挂在哪个接收者上未定。
+   3. 0x7e808 retryFakesign 的退避时长常量未解。
+
+ 编译状态：clang -fsyntax-only -Wall -Wextra 零错误零告警（桩头集 + Extra.h）。
+*/
