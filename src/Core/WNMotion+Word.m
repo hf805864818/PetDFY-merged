@@ -87,7 +87,7 @@ static NSArray *const kWNWordsGesture = @[
 
 // ── 模式词表 ──────────────────────────────────────────────────────────────
 // 对象 @0x1075d0（count=5，elements @0x1058e0）
-// 引用点：[0x42728] 命中后 setModeTo:word 并写 p.dur（dance=3.2，其余 1e9）
+// 引用点：[0x42728] 命中后 setModeTo:word 并写 p.dwell（dance=3.2，其余 1e9）
 static NSArray *const kWNWordsMode = @[
     @"look",    // [0] elem slot 0x1058e0 → CF 0xf3ca8
     @"dizzy",   // [1] elem slot 0x1058e8 → CF 0xf97c8
@@ -169,7 +169,7 @@ static NSDictionary *const kWNWordSounds = @{
         [self setPulse:nil];                                    // [0x4232c] x2 = 0
         [self setExpression:nil];                               // [0x42338] x2 = 0
         [self setModeTo:@"play_ball"];                          // [0x42344]
-        p.dur = 6.5;                                            // [0x42354] 0x401a000000000000 → str [x20,#0x50]
+        p.dwell = 6.5;                                            // [0x42354] 0x401a000000000000 → str [x20,#0x50]
                                                                 //   偏移待定（WNTypes.h §布局校验）
         p.nextAt = self.time + 6.5 + 2.0;                       // [0x4235c..0x42370] time +0x1d8 → str [x20,#0x130]
                                                                 //   偏移待定（WNTypes.h §布局校验）
@@ -211,7 +211,7 @@ static NSDictionary *const kWNWordSounds = @{
         // [0x4243c] 睡着/坐着被叫去走 → 先惊醒
         if ([self is:@"sleep"] || [self is:@"sit"]) {           // CF 0xf38e8 / 0xf38c8
             [self setModeTo:@"wake"];                            // [0x42464] CF 0xf9948
-            p.startle = YES;                                     // [0x42478] strb 1,[x20,#0x1d2]
+            p.wokeNow = YES;                                     // [0x42478] strb 1,[x20,#0x1d2]
                                                                 //   偏移待定（WNTypes.h §布局校验）
         }
 
@@ -219,10 +219,10 @@ static NSDictionary *const kWNWordSounds = @{
         [self setExpression:nil];
         double mn = [self minX];                                // [0x42488] bl -[WNMotion minX]
         double mx = [self maxX];                                // [0x42494] bl -[WNMotion maxX]
-        p.target  = fmax(mn, fmin(mx, tx));                     // [0x4249c] fminnm d0,d0,d10
+        p.walkToX  = fmax(mn, fmin(mx, tx));                     // [0x4249c] fminnm d0,d0,d10
                                                                 // [0x424a0] fmaxnm d0,d9,d0
                                                                 //   偏移待定（WNTypes.h §布局校验）
-        p.targetY = gy;                                         // [0x424a4] stp d0,d8,[x20,#0x58]
+        p.walkToY = gy;                                         // [0x424a4] stp d0,d8,[x20,#0x58]
                                                                 //   偏移待定（WNTypes.h §布局校验）
         // 注释：min/max 两侧是 fminnm/fmaxnm（NaN 传播语义），源码写作 fmin/fmax。
 
@@ -282,19 +282,19 @@ static NSDictionary *const kWNWordSounds = @{
 
             // [0x4264c] 纵向初速三档
             if ([word isEqual:@"jump"]) {
-                p.jumpV = 720.0;                                 // [0x42660] 0xbfca8 → [x20,#0x158]
+                p.launchY = 720.0;                                 // [0x42660] 0xbfca8 → [x20,#0x158]
                                                                 //   偏移待定（WNTypes.h §布局校验）
             } else if ([word isEqual:@"hop"]) {
-                p.jumpV = 480.0;                                 // [0x42680..0x42690] fcsel ne，480.0 立即数
+                p.launchY = 480.0;                                 // [0x42680..0x42690] fcsel ne，480.0 立即数
                                                                 //   偏移待定（WNTypes.h §布局校验）
             } else {
-                p.jumpV = 540.0;                                 // [0x42688] 0xc0018（hop 不成立时的 else 支）
+                p.launchY = 540.0;                                 // [0x42688] 0xc0018（hop 不成立时的 else 支）
                                                                 //   偏移待定（WNTypes.h §布局校验）
             }
 
             // [0x42698] 横向初速：只有 jump 带朝向分量
             //   0x426a8 fmov d0,xzr（=0）；0x426ac cbz 跳过；0x426b0 ldr facing；0x426bc *40.0
-            p.jumpVx = [word isEqual:@"jump"] ? (p.facing * 40.0) : 0.0;
+            p.launchX = [word isEqual:@"jump"] ? (p.facing * 40.0) : 0.0;
                                                                 // 40.0 @0x4044000000000000 → [x20,#0x160]
                                                                 //   偏移待定（WNTypes.h §布局校验）
 
@@ -314,9 +314,9 @@ static NSDictionary *const kWNWordSounds = @{
         if ([kWNWordsMode containsObject:word]) {                // [0x42728] x0 = 0x1075d0
             [self setModeTo:word];                               // [0x4273c]
             // [0x4275c] cmp + fcsel d0：dance → 3.2 @0xbfff8，否则 1e9 @0xbfc68
-            p.dur = [word isEqual:@"dance"] ? 3.2 : 1e9;         // [0x42774] str [x20,#0x50]
+            p.dwell = [word isEqual:@"dance"] ? 3.2 : 1e9;         // [0x42774] str [x20,#0x50]
                                                                 //   偏移待定（WNTypes.h §布局校验）
-            p.willSleep = NO;                                    // [0x42778] strb wzr,[x20,#0x1d3]
+            p.sitSeen = NO;                                    // [0x42778] strb wzr,[x20,#0x1d3]
                                                                 //   偏移待定（WNTypes.h §布局校验）
             if ([word isEqual:@"dance"]) {                       // CF 0xf3d88
                 [self holdFace:@"happy" seconds:3.4];            // [0x4278c] CF 0xf3de8 / 3.4 @0xc0010
@@ -426,7 +426,7 @@ static NSDictionary *const kWNWordSounds = @{
     // [0x42080] 睡着/坐着被叫去走 → 先惊醒（与 doWord: 的 walk 分支同形）
     if ([self is:@"sleep"] || [self is:@"sit"]) {                 // CF 0xf38e8 / 0xf38c8
         [self setModeTo:@"wake"];                                // [0x420a8] CF 0xf9948
-        p.startle = YES;                                         // [0x420b8] strb 1,[x20,#0x1d2]
+        p.wokeNow = YES;                                         // [0x420b8] strb 1,[x20,#0x1d2]
                                                                  //   偏移待定（WNTypes.h §布局校验）
     }
     [self setExpression:nil];                                    // [0x420c0]
@@ -451,9 +451,9 @@ static NSDictionary *const kWNWordSounds = @{
 
     // [0x42154] 提交漫游：模式 csel（run ? "run" : "walk"）
     [self setModeTo:(run ? @"run" : @"walk")];                   // CF 0xf90c8 / 0xf9708
-    p.target  = tx;                                              // [0x42178] stp d8,d0,[x20,#0x58]
+    p.walkToX  = tx;                                              // [0x42178] stp d8,d0,[x20,#0x58]
                                                                  //   偏移待定（WNTypes.h §布局校验）
-    p.targetY = p.gy;                                            // [0x42178] 取 ldr d0,[x20,#0x18]
+    p.walkToY = p.gy;                                            // [0x42178] 取 ldr d0,[x20,#0x18]
                                                                  //   偏移待定（WNTypes.h §布局校验）
     [self setWalkIdentifier:identifier];                         // [0x42180] x19 = identifier
     return YES;                                                  // [0x421a4] eor w0,w25,#1 → 1
@@ -532,7 +532,7 @@ static NSDictionary *const kWNWordSounds = @{
 // 5. NOT RUN：未编译（Windows，无 iOS SDK）；p 字段偏移未定案（WNTypes.h §布局校验），
 //    因此"能编过"与"偏移正确"两件事都未验证。
 // 6. 未决 2 处：
-//    a. p.jumpV/p.jumpVx/nextAt/startle/willSleep 的字节偏移与 WNTypes.h 清单错位
+//    a. p.launchY/p.launchX/nextAt/startle/willSleep 的字节偏移与 WNTypes.h 清单错位
 //       （feet 声明 double[2]，实测 4 个 double ⇒ 其后整体前移 0x10）。
 //       验证动作：按 WNTypes.h 加 static_assert 编一次，报错那组即错。
 //    b. walkTo: / stopWalk: 是否属于本文件而非 WNMotion+Walk 模块，仅由调用关系
