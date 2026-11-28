@@ -636,12 +636,25 @@ static void PDDrawDiag(NSString *fmt, ...) {
     if (tex) [encoder setFragmentTexture:tex atIndex:0];
 
     // 6) 索引绘制：MTLPrimitiveTypeTriangle(3) / UInt16 / offset 0（0x57ef8）
+    /*
+     * 索引绘制。原版无条件提交；这里加两道防御，避免素材不完整 / 网格半初始化时
+     * drawIndexedPrimitives 触发 SIGSEGV（iOS 17 AGX 驱动直接崩 SpringBoard）：
+     *   ① buffer 长度必须够 indexCount * sizeof(uint16)
+     *   ② indexCount 必须是 3 的倍数（三角形列表）
+     */
     if (m.indexCount > 0 && m.indices) {
-        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                            indexCount:(NSUInteger)m.indexCount
-                             indexType:MTLIndexTypeUInt16
-                           indexBuffer:m.indices
-                     indexBufferOffset:0];
+        NSUInteger needBytes = (NSUInteger)m.indexCount * sizeof(uint16_t);
+        NSUInteger haveBytes = (NSUInteger)[(id<MTLBuffer>)m.indices length];
+        if (haveBytes >= needBytes && (m.indexCount % 3) == 0) {
+            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                indexCount:(NSUInteger)m.indexCount
+                                 indexType:MTLIndexTypeUInt16
+                               indexBuffer:m.indices
+                         indexBufferOffset:0];
+        } else {
+            NSLog(@"[PetDFY] skip draw: indexCount=%ld need=%lu have=%lu",
+                  (long)m.indexCount, (unsigned long)needBytes, (unsigned long)haveBytes);
+        }
     }
 }
 
