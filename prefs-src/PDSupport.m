@@ -32,7 +32,25 @@ extern NSString *PDJbroot(NSString *path) __asm__("__Z6jbrootP8NSString");
 //   adrp/add → CF "/Library/Application Support/PetDFY.bundle"
 //   b __Z6jbrootP8NSString
 NSString *PDResourcePath(void) {
-    return PDJbroot(@"/Library/Application Support/PetDFY.bundle");
+    /*
+     * 与主 dylib 的 PDAssetBundleRoots() 保持一致：
+     *   ① /var/mobile/Library/Application Support/PetDFY.bundle（数据目录，路径固定）
+     *   ② /Library/Application Support/PetDFY.bundle（原版位置，jbroot 展开）
+     * 这样用户把素材放 /var/mobile 下，设置页也能看到同一份。
+     */
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *data = @"/var/mobile/Library/Application Support/PetDFY.bundle";
+        NSString *legacy = PDJbroot(@"/Library/Application Support/PetDFY.bundle");
+        if ([fm fileExistsAtPath:data]) {
+            cached = data;
+        } else {
+            cached = legacy;
+        }
+    });
+    return cached;
 }
 
 // 0x0236dc  3 insn（裸常量，不经过 jbroot）
