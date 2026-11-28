@@ -204,6 +204,17 @@ static void PDOverlayPrefsChanged(CFNotificationCenterRef center,
         return NO;
     }
 
+    /*
+     * 素材结构完整性：只有 live/model.json 不够——贴图目录缺失时
+     * WNRenderer 会拿到空网格并提交 drawIndexedPrimitives，iOS 17 上直接 SIGSEGV。
+     * 这里用 PDAssetInstaller 的同一判据（model.json + originals 目录）挡一道。
+     */
+    if (![PDAssetInstaller assetRootIsComplete:bundlePath]) {
+        _lastError = @"asset root incomplete (need originals/)";
+        PDDiag(@"ensureWindow FAIL: asset root incomplete at %@", bundlePath);
+        return NO;
+    }
+
     if (!_root) _root = [PDRootController new];
     if (_root && [_root respondsToSelector:@selector(setOwner:)]) {
         [_root setOwner:self];   // [build.053] 之前从未赋值，viewDidLayoutSubviews 空转
