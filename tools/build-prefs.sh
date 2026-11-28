@@ -34,6 +34,10 @@ fi
 CC="${CC:-clang}"
 ARCH="${ARCH:-arm64e}"
 TRIPLE="${TRIPLE:-${ARCH}-apple-ios16.0}"
+# macOS 的 clang 不支持 -fuse-ld=lld（用 Xcode 的 ld64）；仅 Linux 需要
+LINKER_FLAG=""
+[ "$(uname -s)" = "Linux" ] && LINKER_FLAG="-fuse-ld=lld"
+
 OUT="build/prefs"
 mkdir -p "$OUT"
 
@@ -50,7 +54,7 @@ echo "目标: $TRIPLE"
     -Wno-nullability-completeness -Wno-objc-multiple-method-names \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -I prefs-src -I prefs-shim \
-    -dynamiclib -fuse-ld=lld -Wl,-undefined,dynamic_lookup -install_name @rpath/PetDFYPrefs.dylib \
+    -dynamiclib $LINKER_FLAG -Wl,-undefined,dynamic_lookup -install_name @rpath/PetDFYPrefs.dylib \
     -framework Foundation -framework UIKit -framework CoreGraphics \
     -framework AVFoundation -framework ImageIO -framework UniformTypeIdentifiers \
     -framework CoreFoundation \
