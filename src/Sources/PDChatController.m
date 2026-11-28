@@ -811,7 +811,20 @@ static inline double PDClampD(double v, double lo, double hi) {
 ///   0x18d5c  [[self view] setNeedsLayout]
 - (void)startVoiceInput {
     if ([self closed]) return;
-    if (![self pendingDictation] && [[self dictation] isActive]) return;
+
+    /*
+     * 【长期改造】语音输入改为 toggle：
+     *   · 已在录音 → 本次触发当作「结束录音」（手动发送语义）
+     *     —— 这样「点宠物」就能结束连续录音，不再靠 VoiceEnhance.dylib 的 hook
+     *   · 启动中（pendingDictation）→ 忽略重复点击
+     *   · 未录音 → 走下面的启动流程
+     */
+    if ([[self dictation] isActive]) {
+        [self setDictationManualSend:YES];
+        [[self dictation] finish];
+        return;
+    }
+    if ([self pendingDictation]) return;
 
     [self showComposer];
     if (![[self inputFrame] isHidden]) {
