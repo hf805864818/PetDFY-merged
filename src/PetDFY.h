@@ -153,7 +153,7 @@ typedef struct WNMotionState {
 #import "WNMesh.h"
 #import "WNMotion.h"
 #import "WNPainter.h"
-// WNPreparedDeformer 已并入 WNLiveRig.m（recon 版，自带 @interface）
+#import "WNPreparedDeformer.h"
 #import "WNRenderer.h"
 #import "WNSpring.h"
 #import "WNUploadSurface.h"
