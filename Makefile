@@ -15,7 +15,8 @@
 
 # 只出 arm64：Linux 上的 clang/ld64.lld 编 arm64e 时 cpusubtype 不写 0x80000002，
 # lipo 会判定两个 slice 同架构而拒绝合并。arm64 在 arm64e 设备上可正常加载。
-export ARCHS ?= arm64
+# 设备侧（A12+）的 Preferences.app / SpringBoard 只接受 arm64e；arm64 会被 dlopen_preflight 拒绝
+export ARCHS ?= arm64e
 export TARGET = iphone:clang:latest:16.0
 export INSTALL_TARGET_PROCESSES = SpringBoard
 
