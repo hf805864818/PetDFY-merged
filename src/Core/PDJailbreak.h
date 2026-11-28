@@ -124,24 +124,21 @@ static inline NSArray<NSString *> *PDImportSpoolDirectories(void) {
     return out;
 }
 
-/// 素材 bundle 根。
+/// 素材根（唯一权威，build.93 起）。
 ///
-/// 顺序很重要：
-///   ① /var/mobile/Library/Application Support/PetDFY.bundle
-///      真实数据目录，**不在 jbroot 里**（RootHide 只重定向 /Library /usr /bin 等系统目录）。
-///      好处：路径固定，不随 .jbroot-<UUID> 变化，用户手动放素材最省事。
-///   ② /Library/Application Support/PetDFY.bundle
-///      原版 1.2.1 的位置；RootHide 下由 PDJailbreakCandidates 展开成
-///      <jbroot>/Library/Application Support/PetDFY.bundle。作为兼容回退。
+/// 为什么是 /var/mobile/Library/Xfy：
+///   · 真实路径，RootHide 不重定向 /var/mobile（只重定向 /Library /usr /bin 等）
+///   · 路径固定，不随 .jbroot-<UUID> 变化（重建越狱也不影响）
+///   · mobile 用户可读写，导入素材不需要 root
+///   · 用户在「文件」App 里能直接看到，方便手动放素材
+///
+/// 旧路径 /Library/Application Support/PetDFY.bundle 不再参与读取。
+static inline NSString *PDAssetRootPath(void) {
+    return @"/var/mobile/Library/Xfy";
+}
+
 static inline NSArray<NSString *> *PDAssetBundleRoots(void) {
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
-    for (NSString *p in PDJailbreakCandidates(@"/var/mobile/Library/Application Support/PetDFY.bundle")) {
-        [out addObject:p];
-    }
-    for (NSString *p in PDJailbreakCandidates(@"/Library/Application Support/PetDFY.bundle")) {
-        [out addObject:p];
-    }
-    return out;
+    return @[ PDAssetRootPath() ];
 }
 
 /// 素材兼容安装位置（1.2 源码既有路径，保留不动）

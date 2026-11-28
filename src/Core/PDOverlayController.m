@@ -324,61 +324,13 @@ static void PDOverlayPrefsChanged(CFNotificationCenterRef center,
 ///   2) 候选根按「结构完整度 + 修改时间」打分，避免不完整的旧目录压过新导入的完整包；
 ///   3) 加入素材 bundle 根（参考包 1.2.1 的真实安装位置）。
 static NSString *PDResourceBundlePath(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray<NSString *> *roots = [NSMutableArray array];
-
-    for (NSString *p in PDLegacyImportedRoots()) {
-        if (![roots containsObject:p]) [roots addObject:p];
-    }
-    for (NSString *p in PDAssetBundleRoots()) {
-        if (![roots containsObject:p]) [roots addObject:p];
-    }
-    for (NSString *base in PDImportSpoolDirectories()) {
-        NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:base error:NULL];
-        for (NSString *child in children) {
-            NSString *p = [base stringByAppendingPathComponent:child];
-            BOOL isDir = NO;
-            if (![fm fileExistsAtPath:p isDirectory:&isDir] || !isDir) continue;
-            if (![roots containsObject:p]) [roots addObject:p];
-        }
-    }
-
-    NSString *best = nil;
-    NSInteger bestScore = -1;
-    NSTimeInterval bestTime = -1;
-    for (NSString *r in roots) {
-        NSInteger score = 0;
-        NSString *live = [r stringByAppendingPathComponent:@"live/model.json"];
-        NSString *orig = [r stringByAppendingPathComponent:@"originals/model.json"];
-        BOOL hasLive = [fm fileExistsAtPath:live];
-        BOOL hasOrig = [fm fileExistsAtPath:orig];
-        if (hasLive) score += 100;
-        if (hasOrig) score += 50;
-        if ([fm fileExistsAtPath:[r stringByAppendingPathComponent:@"originals"]]) score += 20;
-        if ([fm fileExistsAtPath:[r stringByAppendingPathComponent:@"clips.plist"]]) score += 10;
-        if ([fm fileExistsAtPath:[r stringByAppendingPathComponent:@"frames"]]) score += 10;
-        if (score == 0) continue;
-
-        NSString *probe = hasLive ? live : (hasOrig ? orig : nil);
-        NSDictionary *attrs = probe ? [fm attributesOfItemAtPath:probe error:NULL] : nil;
-        NSTimeInterval t = attrs ? [attrs[NSFileModificationDate] timeIntervalSince1970] : 0;
-
-        if (score > bestScore || (score == bestScore && t > bestTime)) {
-            bestScore = score;
-            bestTime = t;
-            best = r;
-        }
-    }
-    if (!best) {
-        for (NSString *r in roots) {
-            if ([fm fileExistsAtPath:[r stringByAppendingPathComponent:@"live/model.json"]]) {
-                best = r;
-                break;
-            }
-        }
-    }
-    if (!best) best = [PDAssetBundleRoots() firstObject] ?: @"/Library/Application Support/PetDFY.bundle";
-    return best;
+    /*
+     * build.93：素材根唯一化。
+     * 之前这里遍历 Imported/ + bundle 多个候选并打分，会出现「渲染用一个根、
+     * 音效用另一个根」的混用。现在只有一个根，打分逻辑不再需要。
+     */
+    NSString *root = [PDAssetBundleRoots() firstObject] ?: @"/var/mobile/Library/Xfy";
+    return root;
 }
 
 #pragma mark - 素材包导入（合并自第一套：RootHide 下也能解压）

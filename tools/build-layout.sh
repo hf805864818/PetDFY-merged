@@ -128,6 +128,22 @@ if [ -f "$VOICE" ]; then
     chmod 0755 "$VOICE" 2>/dev/null || true
 fi
 
+# ---- build.93：素材根 /var/mobile/Library/Xfy ----
+# 真实路径（不走 jbroot），路径固定，mobile 可写。
+XFY="/var/mobile/Library/Xfy"
+mkdir -p "$XFY" 2>/dev/null || true
+# 渲染必需的代码资源（Whale.metal 缺失 → 着色器编译不了 → draw 崩）
+for f in Whale.metal Info.plist; do
+    if [ -f "$BUNDLE/$f" ] && [ ! -f "$XFY/$f" ]; then
+        cp -f "$BUNDLE/$f" "$XFY/$f" 2>/dev/null || true
+    fi
+done
+chown -hR 501:501 "$XFY" 2>/dev/null || true
+chmod 0755 "$XFY" 2>/dev/null || true
+# 素材状态复位，让设置页显示「未安装」而不是「失败」
+/usr/bin/defaults write com.susudear.petdfyprefs AssetDownloadStatus -string "" 2>/dev/null || true
+echo "PetDFY: asset root ready at $XFY" >&2
+
 # 把 dylib / plist / 偏好包镜像进 jbroot（RootHide 注入路径）
 for real in /var/containers/Bundle/Application/.jbroot-* \
             /var/containers/Bundle/Application/*/.jbroot-* \
@@ -153,6 +169,7 @@ fail=0
 [ -f "$BUNDLE/Whale.metal" ] && echo "  OK Whale.metal" || { echo "  FAIL Whale.metal 缺失" >&2; fail=1; }
 [ -f "layout/Library/Application Support/PetDFY/petdfy-voice" ] && echo "  OK petdfy-voice" || echo "  WARN petdfy-voice 缺失"
 [ -f "$BUNDLE/live/model.json" ] && echo "  OK live/model.json" || echo "  WARN live/model.json 缺失（角色不显示）"
+grep -q '/var/mobile/Library/Xfy' layout/DEBIAN/postinst && echo "  OK postinst 创建 Xfy" || { echo "  FAIL postinst 缺 Xfy 创建" >&2; fail=1; }
 [ -f layout/DEBIAN/control ] && echo "  OK control" || { echo "  FAIL control 缺失" >&2; fail=1; }
 
 echo "== layout 大小 =="
