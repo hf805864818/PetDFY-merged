@@ -699,7 +699,7 @@ static NSArray *WNAirModes(void)     { return @[@"drag", @"air"]; }             
         // drag：被拎起时身体跟随指针（有阻尼），并产生倾斜与吱声
         // =================================================================
         tDrowse = 0.0;                                    // [0x46a00] sp+0x90
-        if (!responsiveInteraction) {                     // [0x46a0c]
+        if (!self->_responsiveInteraction) {                     // [0x46a0c]
             cTilt = 12.0;                                 // [0x46a30]
             kTilt = 160.0;                                // [0x462f0]
             tiltBias = 0.0;                               // [0x462f4]
@@ -1122,3 +1122,5 @@ label_pose_spine:;                                       // 0x446f8
     // [0x459f0] 栈保护校验 -> [0x45a08] 收尾
     return;
 }
+
+@end
