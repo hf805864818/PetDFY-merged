@@ -36,7 +36,7 @@ jobs:
       - name: Install ldid
         run: |
           set -euo pipefail
-          brew install ldid 2>/dev/null || true
+          brew install ldid dpkg xz 2>/dev/null || true
           which ldid || echo "ldid missing"
 
       - name: Bump version (auto build number)
